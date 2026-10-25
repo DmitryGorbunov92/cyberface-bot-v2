@@ -5,7 +5,7 @@ import base64
 import json
 from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Клиент BotHub
 client = AsyncOpenAI(
     api_key=BOTHUB_API_KEY,
     base_url="https://openai.bothub.chat/v1"
@@ -26,17 +25,17 @@ client = AsyncOpenAI(
 user_generations = {}
 user_photos = {} 
 ADMIN_ID = 1343198511
-STATS_FILE = "stats.json"
+STATS_FILE = "/data/stats.json" 
 
-# --- СТАТИСТИКА ---
+# --- СТАТИСТИКА И РЕФЕРАЛЫ ---
 def load_stats():
     if os.path.exists(STATS_FILE):
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
-            return {"total_users": [], "total_generations": 0}
-    return {"total_users": [], "total_generations": 0}
+            return {"total_users": [], "total_generations": 0, "referrals": {}}
+    return {"total_users": [], "total_generations": 0, "referrals": {}}
 
 def save_stats(stats):
     with open(STATS_FILE, "w", encoding="utf-8") as f:
@@ -61,8 +60,9 @@ STYLES = {
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📸 Создать фото")
+    builder.button(text="🎁 Пригласить друга")
     builder.button(text="ℹ️ Как это работает")
-    builder.adjust(1)
+    builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_styles_keyboard():
@@ -80,6 +80,26 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+# --- СТАРТ ---
+@dp.message(CommandStart(deep_link=True))
+async def start_with_ref(message: Message, command: CommandStart):
+    user_id = message.from_user.id
+    referrer_id = command.args
+    
+    if str(user_id) not in stats_data["total_users"]:
+        stats_data["total_users"].append(str(user_id))
+        # Запоминаем, кто пригласил (если это не сам пользователь)
+        if referrer_id and referrer_id != str(user_id):
+            stats_data["referrals"][str(user_id)] = referrer_id
+        save_stats(stats_data)
+
+    await message.answer(
+        "Привет! Я бот CyberFace. 🤖\n"
+        "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
+        "🎁 Тебе доступно 2 бесплатные генерации.",
+        reply_markup=get_main_keyboard()
+    )
+
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     user_id = message.from_user.id
@@ -94,13 +114,25 @@ async def start_cmd(message: Message):
         reply_markup=get_main_keyboard()
     )
 
+@dp.message(F.text == "🎁 Пригласить друга")
+async def invite_friend(message: Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/CyberFace_ru_bot?start={user_id}"
+    await message.answer(
+        "🎁 **Партнерская программа**\n\n"
+        "Пригласи друга по своей ссылке. Как только он купит пакет генераций (50 Stars), ты получишь **+2 бесплатные генерации** в подарок!\n\n"
+        f"Твоя ссылка:\n`{ref_link}`",
+        parse_mode="Markdown"
+    )
+
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     total = len(stats_data["total_users"])
     gens = stats_data["total_generations"]
-    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}", parse_mode="Markdown")
+    refs = len(stats_data["referrals"])
+    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов (перешли): {refs}", parse_mode="Markdown")
 
 @dp.message(F.text == "ℹ️ Как это работает")
 async def help_cmd(message: Message):
@@ -118,6 +150,7 @@ async def help_cmd(message: Message):
 async def ask_photo(message: Message):
     await message.answer("Жду твоё фото! Просто отправь его в чат. 📥")
 
+# --- ОБРАБОТКА ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     user_id = message.from_user.id
@@ -189,9 +222,10 @@ async def handle_style_choice(callback: CallbackQuery):
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
 
+# --- ОБРАБОТКА ТЕКСТА ---
 @dp.message(F.text)
 async def handle_text(message: Message):
-    if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает"]:
+    if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает", "🎁 Пригласить друга"]:
         return
 
     user_id = message.from_user.id
@@ -240,6 +274,7 @@ async def handle_text(message: Message):
         logging.error(f"Error: {e}")
         await message.answer(f"Ошибка: {str(e)[:150]}...")
 
+# --- ОПЛАТА И НАЧИСЛЕНИЕ БОНУСОВ ---
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -248,6 +283,19 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 async def process_successful_payment(message: Message):
     user_id = message.from_user.id
     user_generations[user_id] = 0 
+    
+    # Проверяем, есть ли пригласивший у этого пользователя
+    referrer_id = stats_data["referrals"].get(str(user_id))
+    
+    if referrer_id:
+        # Начисляем бонус пригласившему (+2 генерации)
+        current_ref_count = user_generations.get(int(referrer_id), 0)
+        user_generations[int(referrer_id)] = current_ref_count - 2 # Сдвигаем лимит назад
+        try:
+            await bot.send_message(int(referrer_id), "🎉 Твой друг купил пакет! Тебе начислено +2 бесплатные генерации.")
+        except:
+            pass
+            
     await message.answer("Оплата прошла успешно! 🎉 Тебе добавлено 5 новых генераций.")
 
 async def main():
