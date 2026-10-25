@@ -87,7 +87,7 @@ async def handle_photo(message: Message):
         
         # Запрос к нейросети через BotHub
         response = await client.chat.completions.create(
-            model="gemini-3.1-flash-image-preview",
+            model="gemini-2.5-flash-image",
             messages=[
                 {
                     "role": "user",
