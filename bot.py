@@ -2,13 +2,14 @@ import asyncio
 import os
 import logging
 import base64
+import json
 from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
-# Токены из переменных окружения
+# Токены
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BOTHUB_API_KEY = os.environ.get("BOTHUB_API_KEY")
 
@@ -24,11 +25,26 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
-
-# Твой ID для безлимитного теста
 ADMIN_ID = 1343198511
+STATS_FILE = "stats.json"
 
-# Словарь стилей с обновленными промптами
+# --- СТАТИСТИКА ---
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {"total_users": [], "total_generations": 0}
+    return {"total_users": [], "total_generations": 0}
+
+def save_stats(stats):
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False)
+
+stats_data = load_stats()
+
+# --- СТИЛИ ---
 STYLES = {
     "cyber": "Киберпанк-портрет в неоновом свете, футуристичный стиль, высокое качество. Сохрани лица всех людей на фото, не меняй их черты.",
     "anime": "Аниме-стиль, 2D, большие глаза, яркие цвета, стиль студии Ghibli, детализированный фон. Сохрани лица всех людей на фото, не меняй их черты.",
@@ -66,23 +82,36 @@ def get_styles_keyboard():
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
+    user_id = message.from_user.id
+    if str(user_id) not in stats_data["total_users"]:
+        stats_data["total_users"].append(str(user_id))
+        save_stats(stats_data)
+
     await message.answer(
         "Привет! Я бот CyberFace. 🤖\n"
-        "Пришли мне своё фото, выбери стиль, и я сделаю из него крутой арт.\n\n"
+        "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
         "🎁 Тебе доступно 2 бесплатные генерации.",
         reply_markup=get_main_keyboard()
     )
+
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    total = len(stats_data["total_users"])
+    gens = stats_data["total_generations"]
+    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}", parse_mode="Markdown")
 
 @dp.message(F.text == "ℹ️ Как это работает")
 async def help_cmd(message: Message):
     await message.answer(
         "Всё просто:\n"
-        "1️⃣ Отправь мне своё селфи или любое фото.\n"
-        "2️⃣ Выбери стиль из предложенных кнопок.\n"
-        "3️⃣ Нейросеть обработает фото (займет около 30 секунд).\n"
+        "1️⃣ Отправь мне своё селфи (или напиши текст).\n"
+        "2️⃣ Выбери стиль из предложенных кнопок (для фото).\n"
+        "3️⃣ Нейросеть обработает запрос (займет около 30 секунд).\n"
         "4️⃣ Получи крутой арт!\n\n"
         "💳 Первые 2 генерации — бесплатно.\n"
-        "Дальше: 50 Telegram Stars за пакет из 5 фото."
+        "Дальше: 50 Telegram Stars за пакет из 5 генераций."
     )
 
 @dp.message(F.text == "📸 Создать фото")
@@ -94,7 +123,6 @@ async def handle_photo(message: Message):
     user_id = message.from_user.id
     count = user_generations.get(user_id, 0)
     
-    # Проверка лимита (если это не админ)
     if user_id != ADMIN_ID and count >= 2:
         await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
         await bot.send_invoice(
@@ -109,7 +137,7 @@ async def handle_photo(message: Message):
         return
 
     user_photos[user_id] = message.photo[-1].file_id
-    await message.answer("Отличное фото! Теперь выбери стиль, в котором я его обработаю:", reply_markup=get_styles_keyboard())
+    await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
 
 @dp.callback_query(F.data.startswith("style_"))
 async def handle_style_choice(callback: CallbackQuery):
@@ -117,10 +145,10 @@ async def handle_style_choice(callback: CallbackQuery):
     style_key = callback.data.replace("style_", "")
     
     if user_id not in user_photos:
-        await callback.message.answer("Ошибка: фото не найдено. Пожалуйста, отправь фото заново.")
+        await callback.message.answer("Фото устарело. Отправь новое фото.")
         return
 
-    await callback.message.edit_text(f"Выбран стиль: {style_key}. Обрабатываю фото, подожди около 30 секунд... ⏳")
+    await callback.message.edit_text(f"Выбран стиль: {style_key}. Обрабатываю фото... ⏳")
     await callback.answer()
     
     try:
@@ -143,20 +171,74 @@ async def handle_style_choice(callback: CallbackQuery):
             image_base64 = response.data[0].b64_json
             image_bytes = base64.b64decode(image_base64)
             photo = BufferedInputFile(image_bytes, filename="cyberface.jpg")
-            await callback.message.answer_photo(photo=photo, caption="Готово! ⚡️ Не забудь поделиться с друзьями!")
             
             count = user_generations.get(user_id, 0)
             user_generations[user_id] = count + 1
+            stats_data["total_generations"] += 1
+            save_stats(stats_data)
             
+            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+            await callback.message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
         else:
-            await callback.message.answer("Не удалось сгенерировать фото. Попробуй позже.")
+            await callback.message.answer("Не удалось сгенерировать фото.")
             
         if os.path.exists(file_path):
             os.remove(file_path)
             
     except Exception as e:
         logging.error(f"Error: {e}")
-        await callback.message.answer(f"Произошла ошибка: {str(e)[:150]}... Попробуй позже.")
+        await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
+
+@dp.message(F.text)
+async def handle_text(message: Message):
+    if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает"]:
+        return
+
+    user_id = message.from_user.id
+    count = user_generations.get(user_id, 0)
+    
+    if user_id != ADMIN_ID and count >= 2:
+        await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="5 генераций CyberFace",
+            description="Оплата 5 дополнительных генераций",
+            payload="5_generations",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="5 генераций", amount=50)]
+        )
+        return
+
+    await message.answer("Рисую по твоему описанию, подожди около 30 секунд... 🎨")
+    
+    try:
+        response = await client.images.generate(
+            model="gemini-2.5-flash-image",
+            prompt=f"Высокодетализированное изображение: {message.text}. Стиль: реализм, 8k, качество.",
+            response_format="b64_json",
+            n=1,
+            size="1024x1024"
+        )
+        
+        if response.data and len(response.data) > 0:
+            image_base64 = response.data[0].b64_json
+            image_bytes = base64.b64decode(image_base64)
+            photo = BufferedInputFile(image_bytes, filename="cyberface_art.jpg")
+            
+            count = user_generations.get(user_id, 0)
+            user_generations[user_id] = count + 1
+            stats_data["total_generations"] += 1
+            save_stats(stats_data)
+            
+            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+            await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
+        else:
+            await message.answer("Не удалось нарисовать.")
+            
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        await message.answer(f"Ошибка: {str(e)[:150]}...")
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
