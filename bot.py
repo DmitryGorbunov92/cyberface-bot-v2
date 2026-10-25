@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-# Токены берутся из переменных окружения (Secrets)
+# Токены берутся из переменных окружения
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BOTHUB_API_KEY = os.environ.get("BOTHUB_API_KEY")
 
@@ -76,35 +76,24 @@ async def handle_photo(message: Message):
     await message.answer("Обрабатываю фото, подожди около 30 секунд... ⏳")
     
     try:
+        # Скачиваем фото
         file_id = message.photo[-1].file_id
         file = await bot.get_file(file_id)
         file_path = f"temp_{user_id}.jpg"
         await bot.download_file(file.file_path, file_path)
         
-        with open(file_path, "rb") as f:
-            image_data = f.read()
-        base64_image = base64.b64encode(image_data).decode('utf-8')
+        # Отправляем в BotHub через метод images.edit
+        with open(file_path, "rb") as image_file:
+            response = await client.images.edit(
+                model="gemini-2.5-flash-image",
+                image=image_file,
+                prompt="Переделай это фото в стиле киберпанк, неоновый свет, футуристичный портрет, высокое качество. Сохрани лицо человека.",
+                response_format="b64_json"
+            )
         
-        # Запрос к нейросети через BotHub
-        response = await client.chat.completions.create(
-            model="gemini-3.1-flash-image-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Переделай это фото в стиле киберпанк, неоновый свет, футуристичный портрет, высокое качество. Сохрани лицо человека."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            extra_body={"bothub": {"return_base64": True}}
-        )
-        
-        message_dict = response.choices[0].message.model_dump()
-        images = message_dict.get("images", [])
-        
-        if images:
-            image_base64 = images[0]["image_url"]["url"]
+        # Обрабатываем ответ
+        if response.data and len(response.data) > 0:
+            image_base64 = response.data[0].b64_json
             image_bytes = base64.b64decode(image_base64)
             photo = BufferedInputFile(image_bytes, filename="cyberface.jpg")
             await message.answer_photo(photo=photo, caption="Готово! ⚡️ Не забудь поделиться с друзьями!")
@@ -112,12 +101,14 @@ async def handle_photo(message: Message):
         else:
             await message.answer("Не удалось сгенерировать фото. Попробуй позже.")
             
+        # Удаляем временный файл
         if os.path.exists(file_path):
             os.remove(file_path)
             
     except Exception as e:
         logging.error(f"Error: {e}")
-        await message.answer(f"Произошла ошибка: {str(e)[:100]}... Попробуй позже.")
+        # Выводим ошибку в чат, чтобы понять, в чем дело
+        await message.answer(f"Произошла ошибка: {str(e)[:150]}... Попробуй позже.")
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
