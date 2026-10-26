@@ -3,10 +3,11 @@ import os
 import logging
 import base64
 import json
+import aiohttp
 from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery
+from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery, FSInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -35,6 +36,7 @@ class UserState(StatesGroup):
     waiting_for_edit_photo = State()
     waiting_for_gift_photo = State()
     waiting_for_text = State()
+    waiting_for_music_prompt = State()
 
 # --- СТАТИСТИКА ---
 def load_stats():
@@ -70,11 +72,12 @@ STYLES = {
 def get_start_showcase():
     builder = InlineKeyboardBuilder()
     builder.button(text="🎨 Создать арт по фото", callback_data="menu_art")
+    builder.button(text="🎵 Создать песню", callback_data="menu_music")
     builder.button(text="🖼 Нарисовать с нуля", callback_data="menu_text_art")
     builder.button(text="📸 Изменить фото (текст)", callback_data="menu_edit")
     builder.button(text="🎁 Сделать подарок", callback_data="menu_gift")
     builder.button(text="ℹ️ Как это работает", callback_data="menu_help")
-    builder.adjust(1, 1, 1, 1, 1)
+    builder.adjust(1, 1, 1, 1, 1, 1)
     return builder.as_markup()
 
 def get_styles_keyboard():
@@ -89,6 +92,22 @@ def get_styles_keyboard():
     builder.button(text="🐉 Фэнтези", callback_data="style_fantasy")
     builder.button(text="👑 Роскошь", callback_data="style_royal")
     builder.button(text="🎞 Ретро", callback_data="style_retro")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_gender_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👨 Мужской голос", callback_data="music_male")
+    builder.button(text="👩 Женский голос", callback_data="music_female")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_genre_keyboard(gender):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎸 Рок", callback_data=f"genre_rock_{gender}")
+    builder.button(text="🎤 Рэп", callback_data=f"genre_rap_{gender}")
+    builder.button(text="🎧 Поп", callback_data=f"genre_pop_{gender}")
+    builder.button(text="🎹 Электроника", callback_data=f"genre_electro_{gender}")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -109,7 +128,7 @@ async def start_with_ref(message: Message, command: CommandStart, state: FSMCont
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
         "Здесь ты можешь превратить свои фото в крутые арты, "
         "создать уникальную песню или отредактировать фото.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "🎁 Тебе доступно 2 бесплатные генерации (для фото).\n\n"
         "👇 **Выбери, что хочешь сделать:**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
@@ -127,7 +146,7 @@ async def start_cmd(message: Message, state: FSMContext):
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
         "Здесь ты можешь превратить свои фото в крутые арты, "
         "создать уникальную песню или отредактировать фото.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "🎁 Тебе доступно 2 бесплатные генерации (для фото).\n\n"
         "👇 **Выбери, что хочешь сделать:**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
@@ -150,22 +169,25 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Отправь фото, а затем напиши, что с ним сделать (например, 'сделай закат').")
     elif action == "gift":
         await state.set_state(UserState.waiting_for_gift_photo)
-        await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт (а скоро добавим и песню!).")
+        await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт.")
+    elif action == "music":
+        await state.set_state(UserState.waiting_for_music_prompt)
+        await callback.message.answer("🎵 Напиши, о чем будет песня (например: 'Песня про моего кота, который любит спать').")
     elif action == "help":
         await callback.message.answer(
             "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
-            "Первые 2 генерации бесплатно, дальше — 50 Stars за пакет."
+            "А еще я могу создавать песни (50 Stars за 2 варианта трека)."
         )
 
-# --- ПРОВЕРКА ЛИМИТОВ ---
+# --- ПРОВЕРКА ЛИМИТОВ (ДЛЯ ФОТО) ---
 async def check_limit(message: Message, user_id: int):
     count = user_generations.get(user_id, 0)
     if user_id != ADMIN_ID and count >= 2:
-        await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
+        await message.answer("Бесплатные генерации картинок закончились! Хочешь еще 5 штук за 50 Stars?")
         await bot.send_invoice(
             chat_id=message.chat.id,
             title="5 генераций AI Portrait",
-            description="Оплата 5 дополнительных генераций",
+            description="Оплата 5 дополнительных генераций картинок",
             payload="5_generations",
             provider_token="",
             currency="XTR",
@@ -190,7 +212,6 @@ async def handle_photo(message: Message, state: FSMContext):
         await state.set_state(UserState.waiting_for_text)
         await message.answer("Фото получено! Теперь напиши текстом, что с ним сделать (например, 'замени фон на пляж').")
     elif current_state == UserState.waiting_for_gift_photo:
-        # Пока делаем как арт, но с пометкой "подарок"
         user_photos[user_id] = message.photo[-1].file_id
         await message.answer("Фото получено! Выбери стиль для подарка:", reply_markup=get_styles_keyboard())
     else:
@@ -253,9 +274,15 @@ async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
     
+    # 1. Текст для музыки
+    if current_state == UserState.waiting_for_music_prompt:
+        await state.update_data(music_prompt=message.text)
+        await message.answer("Отлично! Теперь выбери, какой голос будет петь:", reply_markup=get_gender_keyboard())
+        return
+
     if not await check_limit(message, user_id): return
 
-    # 1. Если ждем текст для рисования с нуля
+    # 2. Если ждем текст для рисования с нуля
     if current_state == UserState.waiting_for_text and user_id not in user_photos:
         await message.answer("Рисую с нуля по описанию... 🎨")
         try:
@@ -277,7 +304,7 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Если ждем текст для изменения фото
+    # 3. Если ждем текст для изменения фото
     elif current_state == UserState.waiting_for_text and user_id in user_photos:
         await message.answer("Применяю изменения к фото... ⏳")
         try:
@@ -308,15 +335,98 @@ async def handle_text(message: Message, state: FSMContext):
     else:
         await message.answer("Я не понял команду. Нажми /start и выбери действие из меню 👇")
 
-# --- ОПЛАТА ---
+# --- ВЫБОР ГОЛОСА И ЖАНРА ДЛЯ МУЗЫКИ ---
+@dp.callback_query(F.data.startswith("music_"))
+async def handle_music_gender(callback: CallbackQuery, state: FSMContext):
+    gender = "male" if callback.data == "music_male" else "female"
+    await state.update_data(music_gender=gender)
+    await callback.message.edit_text("Отлично! Теперь выбери жанр песни:", reply_markup=get_genre_keyboard(gender))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("genre_"))
+async def handle_music_genre(callback: CallbackQuery, state: FSMContext):
+    # data вида: genre_rock_male
+    parts = callback.data.split("_")
+    genre = parts[1]
+    gender = parts[2]
+    
+    data = await state.get_data()
+    prompt_text = data.get("music_prompt", "Песня про жизнь")
+    user_id = callback.from_user.id
+    
+    await state.clear()
+    
+    # Если это админ (ты) — генерируем бесплатно
+    if user_id == ADMIN_ID:
+        await callback.message.edit_text(f"🎵 Тема: {prompt_text}\n🎸 Жанр: {genre}\n\n[Админ-режим] Генерирую песню бесплатно... 🎶")
+        await generate_music(callback.message, prompt_text, genre, gender)
+        return
+
+    # Для остальных пользователей — выставляем счет
+    await callback.message.edit_text(f"🎵 Тема: {prompt_text}\n🎸 Жанр: {genre}\n\nГенерация песни стоит 50 Stars. После оплаты ты получишь сразу 2 варианта трека. Выставить счет?")
+    
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="Генерация песни",
+        description="2 варианта трека на выбор",
+        payload=f"music_pay_{genre}_{gender}_{prompt_text[:50]}", 
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Генерация песни", amount=50)]
+    )
+    await callback.answer()
+
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ МУЗЫКИ (И СКАЧИВАНИЯ) ---
+async def generate_music(message: Message, prompt_text: str, genre: str, gender: str):
+    try:
+        # Запрос к Suno через BotHub
+        response = await client.audio.speech.create(
+            model="suno-v5.5",
+            voice="alloy", 
+            input=f"Создай песню на русском языке. Жанр: {genre}. Голос: {gender}. Тема: {prompt_text}. Чистый русский вокал без акцента.",
+            extra_body={
+                "prompt": f"Создай песню на русском языке. Жанр: {genre}. Голос: {gender}. Тема: {prompt_text}. Чистый русский вокал без акцента.",
+                "make_instrumental": False
+            }
+        )
+        
+        # В реальности BotHub вернет ссылку на аудио. 
+        # Скачиваем файл по ссылке (если API вернул URL)
+        # Здесь мы предполагаем, что response.url содержит ссылку на файл.
+        # В зависимости от формата ответа BotHub, код может отличаться.
+        
+        # Для примера, если это прямой поток байтов:
+        audio_bytes = await response.aread()
+        
+        # Отправляем аудио
+        audio_file = BufferedInputFile(audio_bytes, filename="song.mp3")
+        await message.answer_audio(audio=audio_file, caption="🎶 Твоя песня готова! Наслаждайся!")
+        
+    except Exception as e:
+        logging.error(f"Music Error: {e}")
+        await message.answer(f"Ошибка при генерации музыки: {str(e)[:150]}...")
+
+# --- ОПЛАТА (ФОТО И МУЗЫКА) ---
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @dp.message(F.successful_payment)
-async def payment_ok(message: Message):
-    user_generations[message.from_user.id] = 0 
-    await message.answer("Оплата прошла! 🎉 Добавлено 5 генераций.")
+async def payment_ok(message: Message, state: FSMContext):
+    payload = message.successful_payment.invoice_payload
+    
+    if payload.startswith("music_pay_"):
+        parts = payload.split("_")
+        genre = parts[2]
+        gender = parts[3]
+        prompt_text = "_".join(parts[4:]) 
+        
+        await message.answer("✅ Оплата получена! Генерирую песню (это займет около 2-3 минут)... 🎶")
+        await generate_music(message, prompt_text, genre, gender)
+            
+    else:
+        user_generations[message.from_user.id] = 0 
+        await message.answer("Оплата прошла! 🎉 Добавлено 5 генераций картинок.")
 
 async def main():
     await dp.start_polling(bot)
