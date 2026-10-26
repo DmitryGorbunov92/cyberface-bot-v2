@@ -8,6 +8,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 # Токены
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -24,11 +26,17 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
-last_photo = {} # <--- НОВОЕ: Храним последнее фото для текстовых правок
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
-# --- СТАТИСТИКА И РЕФЕРАЛЫ ---
+# --- СОСТОЯНИЯ (FSM) ---
+class UserState(StatesGroup):
+    waiting_for_art_photo = State()
+    waiting_for_edit_photo = State()
+    waiting_for_gift_photo = State()
+    waiting_for_text = State()
+
+# --- СТАТИСТИКА ---
 def load_stats():
     if os.path.exists(STATS_FILE):
         try:
@@ -46,25 +54,28 @@ stats_data = load_stats()
 
 # --- СТИЛИ ---
 STYLES = {
-    "cyber": "Киберпанк-портрет в неоновом свете, футуристичный стиль, высокое качество. Сохрани лица всех людей на фото, не меняй их черты.",
-    "anime": "Аниме-стиль, 2D, большие глаза, яркие цвета, стиль студии Ghibli, детализированный фон. Сохрани лица всех людей на фото, не меняй их черты.",
-    "3d": "3D-мультфильм, стиль Pixar/Disney, милый, мягкий свет, детализированная текстура кожи. Сохрани лица всех людей на фото, не меняй их черты.",
-    "military": "Тактический военный стиль, камуфляж, разгрузка, суровый взгляд, реалистичный. Сохрани лица всех людей на фото, не меняй их черты.",
-    "movie": "Голливудский блокбастер, кинематографичный свет, драматичные тени, постер фильма, 8k. Сохрани лица всех людей на фото, не меняй их черты.",
-    "noir": "Нуар, черно-белый, драматичный свет, стиль детектива 1940-х, дождь, плащ. Сохрани лица всех людей на фото, не меняй их черты.",
-    "painting": "Живопись эпохи Возрождения, масляные краски, классическое искусство, барочный свет. Сохрани лица всех людей на фото, не меняй их черты.",
-    "fantasy": "Фэнтези, стиль D&D, средневековые доспехи, эпический фон, магический свет. Сохрани лица всех людей на фото, не меняй их черты.",
-    "royal": "Королевская роскошь, барокко, золотые украшения, элегантная одежда, дорогой свет. Сохрани лица всех людей на фото, не меняй их черты.",
-    "retro": "Ретро 1980-х, винтажная фотография, зерно пленки, неоновые вывески, теплые тона. Сохрани лица всех людей на фото, не меняй их черты."
+    "cyber": "Киберпанк-портрет в неоновом свете, футуристичный стиль. Сохрани лица всех людей на фото.",
+    "anime": "Аниме-стиль, 2D, большие глаза, яркие цвета, студия Ghibli. Сохрани лица всех людей на фото.",
+    "3d": "3D-мультфильм, стиль Pixar/Disney, милый, мягкий свет, текстура кожи. Сохрани лица всех людей на фото.",
+    "military": "Тактический военный стиль, камуфляж, суровый взгляд. Сохрани лица всех людей на фото.",
+    "movie": "Голливудский блокбастер, кинематографичный свет, постер фильма, 8k. Сохрани лица всех людей на фото.",
+    "noir": "Нуар, черно-белый, драматичный свет, стиль детектива 1940-х. Сохрани лица всех людей на фото.",
+    "painting": "Живопись эпохи Возрождения, масляные краски, барочный свет. Сохрани лица всех людей на фото.",
+    "fantasy": "Фэнтези, стиль D&D, средневековые доспехи, магический свет. Сохрани лица всех людей на фото.",
+    "royal": "Королевская роскошь, барокко, золотые украшения, дорогой свет. Сохрани лица всех людей на фото.",
+    "retro": "Ретро 1980-х, винтажная фотография, зерно пленки, неоновые вывески. Сохрани лица всех людей на фото."
 }
 
-def get_main_keyboard():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📸 Создать фото")
-    builder.button(text="🎁 Пригласить друга")
-    builder.button(text="ℹ️ Как это работает")
-    builder.adjust(2, 1)
-    return builder.as_markup(resize_keyboard=True)
+# --- КЛАВИАТУРЫ ---
+def get_start_showcase():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎨 Создать арт по фото", callback_data="menu_art")
+    builder.button(text="🖼 Нарисовать с нуля", callback_data="menu_text_art")
+    builder.button(text="📸 Изменить фото (текст)", callback_data="menu_edit")
+    builder.button(text="🎁 Сделать подарок", callback_data="menu_gift")
+    builder.button(text="ℹ️ Как это работает", callback_data="menu_help")
+    builder.adjust(1, 1, 1, 1, 1)
+    return builder.as_markup()
 
 def get_styles_keyboard():
     builder = InlineKeyboardBuilder()
@@ -81,8 +92,10 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+# --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
-async def start_with_ref(message: Message, command: CommandStart):
+async def start_with_ref(message: Message, command: CommandStart, state: FSMContext):
+    await state.clear()
     user_id = message.from_user.id
     referrer_id = command.args
     
@@ -93,68 +106,60 @@ async def start_with_ref(message: Message, command: CommandStart):
         save_stats(stats_data)
 
     await message.answer(
-        "Привет! Я бот AI Portrait. 🤖\n"
-        "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.",
-        reply_markup=get_main_keyboard()
+        "👋 **Добро пожаловать в AI Portrait!**\n\n"
+        "Здесь ты можешь превратить свои фото в крутые арты, "
+        "создать уникальную песню или отредактировать фото.\n\n"
+        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "👇 **Выбери, что хочешь сделать:**",
+        reply_markup=get_start_showcase(),
+        parse_mode="Markdown"
     )
 
 @dp.message(Command("start"))
-async def start_cmd(message: Message):
+async def start_cmd(message: Message, state: FSMContext):
+    await state.clear()
     user_id = message.from_user.id
     if str(user_id) not in stats_data["total_users"]:
         stats_data["total_users"].append(str(user_id))
         save_stats(stats_data)
 
     await message.answer(
-        "Привет! Я бот AI Portrait. 🤖\n"
-        "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.",
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message(F.text == "🎁 Пригласить друга")
-async def invite_friend(message: Message):
-    user_id = message.from_user.id
-    ref_link = f"https://t.me/CyberFace_ru_bot?start={user_id}"
-    await message.answer(
-        "🎁 **Партнерская программа**\n\n"
-        "Пригласи друга по своей ссылке. Как только он купит пакет генераций (50 Stars), ты получишь **+2 бесплатные генерации** в подарок!\n\n"
-        f"Твоя ссылка:\n`{ref_link}`",
+        "👋 **Добро пожаловать в AI Portrait!**\n\n"
+        "Здесь ты можешь превратить свои фото в крутые арты, "
+        "создать уникальную песню или отредактировать фото.\n\n"
+        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "👇 **Выбери, что хочешь сделать:**",
+        reply_markup=get_start_showcase(),
         parse_mode="Markdown"
     )
 
-@dp.message(Command("stats"))
-async def stats_cmd(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    total = len(stats_data["total_users"])
-    gens = stats_data["total_generations"]
-    refs = len(stats_data["referrals"])
-    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
-
-@dp.message(F.text == "ℹ️ Как это работает")
-async def help_cmd(message: Message):
-    await message.answer(
-        "Всё просто:\n"
-        "1️⃣ Отправь мне своё селфи (или напиши текст).\n"
-        "2️⃣ Выбери стиль из предложенных кнопок (для фото).\n"
-        "3️⃣ Нейросеть обработает запрос (займет около 30 секунд).\n"
-        "4️⃣ Получи крутой арт!\n\n"
-        "💡 Если хочешь изменить последнее фото, просто напиши, что сделать (например, 'сделай закат').\n\n"
-        "💳 Первые 2 генерации — бесплатно.\n"
-        "Дальше: 50 Telegram Stars за пакет из 5 генераций."
-    )
-
-@dp.message(F.text == "📸 Создать фото")
-async def ask_photo(message: Message):
-    await message.answer("Жду твоё фото! Просто отправь его в чат. 📥")
-
-@dp.message(F.photo)
-async def handle_photo(message: Message):
-    user_id = message.from_user.id
-    count = user_generations.get(user_id, 0)
+# --- ОБРАБОТКА КНОПОК МЕНЮ ---
+@dp.callback_query(F.data.startswith("menu_"))
+async def handle_menu(callback: CallbackQuery, state: FSMContext):
+    action = callback.data.replace("menu_", "")
+    await callback.answer()
     
+    if action == "art":
+        await state.set_state(UserState.waiting_for_art_photo)
+        await callback.message.answer("Отправь мне своё фото, и я предложу стили! 📥")
+    elif action == "text_art":
+        await state.set_state(UserState.waiting_for_text)
+        await callback.message.answer("Напиши, что нарисовать (например, 'Кот в космосе'). 🎨")
+    elif action == "edit":
+        await state.set_state(UserState.waiting_for_edit_photo)
+        await callback.message.answer("Отправь фото, а затем напиши, что с ним сделать (например, 'сделай закат').")
+    elif action == "gift":
+        await state.set_state(UserState.waiting_for_gift_photo)
+        await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт (а скоро добавим и песню!).")
+    elif action == "help":
+        await callback.message.answer(
+            "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
+            "Первые 2 генерации бесплатно, дальше — 50 Stars за пакет."
+        )
+
+# --- ПРОВЕРКА ЛИМИТОВ ---
+async def check_limit(message: Message, user_id: int):
+    count = user_generations.get(user_id, 0)
     if user_id != ADMIN_ID and count >= 2:
         await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
         await bot.send_invoice(
@@ -166,14 +171,34 @@ async def handle_photo(message: Message):
             currency="XTR",
             prices=[LabeledPrice(label="5 генераций", amount=50)]
         )
-        return
+        return False
+    return True
 
-    user_photos[user_id] = message.photo[-1].file_id
-    last_photo[user_id] = message.photo[-1].file_id # <--- Запоминаем фото
-    await message.answer("Отличное фото! Выбери стиль или напиши текстом, что с ним сделать:", reply_markup=get_styles_keyboard())
+# --- ПРИЕМ ФОТО ---
+@dp.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not await check_limit(message, user_id): return
 
+    current_state = await state.get_state()
+    
+    if current_state == UserState.waiting_for_art_photo:
+        user_photos[user_id] = message.photo[-1].file_id
+        await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
+    elif current_state == UserState.waiting_for_edit_photo:
+        user_photos[user_id] = message.photo[-1].file_id
+        await state.set_state(UserState.waiting_for_text)
+        await message.answer("Фото получено! Теперь напиши текстом, что с ним сделать (например, 'замени фон на пляж').")
+    elif current_state == UserState.waiting_for_gift_photo:
+        # Пока делаем как арт, но с пометкой "подарок"
+        user_photos[user_id] = message.photo[-1].file_id
+        await message.answer("Фото получено! Выбери стиль для подарка:", reply_markup=get_styles_keyboard())
+    else:
+        await message.answer("Сначала выбери действие в меню /start 👇")
+
+# --- ГЕНЕРАЦИЯ ПО СТИЛЮ ---
 @dp.callback_query(F.data.startswith("style_"))
-async def handle_style_choice(callback: CallbackQuery):
+async def handle_style(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     style_key = callback.data.replace("style_", "")
     
@@ -181,7 +206,7 @@ async def handle_style_choice(callback: CallbackQuery):
         await callback.message.answer("Фото устарело. Отправь новое фото.")
         return
 
-    await callback.message.edit_text(f"Выбран стиль: {style_key}. Обрабатываю фото... ⏳")
+    await callback.message.edit_text("Обрабатываю фото... ⏳")
     await callback.answer()
     
     try:
@@ -200,10 +225,10 @@ async def handle_style_choice(callback: CallbackQuery):
                 response_format="b64_json"
             )
         
-        if response.data and len(response.data) > 0:
+        if response.data:
             image_base64 = response.data[0].b64_json
             image_bytes = base64.b64decode(image_base64)
-            photo = BufferedInputFile(image_bytes, filename="ai_portrait.jpg")
+            photo = BufferedInputFile(image_bytes, filename="art.jpg")
             
             count = user_generations.get(user_id, 0)
             user_generations[user_id] = count + 1
@@ -213,131 +238,85 @@ async def handle_style_choice(callback: CallbackQuery):
             left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
             await callback.message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
         else:
-            await callback.message.answer("Не удалось сгенерировать фото.")
-            
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            
+            await callback.message.answer("Не удалось сгенерировать.")
+        if os.path.exists(file_path): os.remove(file_path)
     except Exception as e:
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
 
-# --- ОБРАБОТКА ТЕКСТА (С УЧЕТОМ ПОСЛЕДНЕГО ФОТО) ---
+# --- ТЕКСТ (С УЧЕТОМ СОСТОЯНИЙ) ---
 @dp.message(F.text)
-async def handle_text(message: Message):
+async def handle_text(message: Message, state: FSMContext):
     if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает", "🎁 Пригласить друга"]:
         return
 
     user_id = message.from_user.id
-    count = user_generations.get(user_id, 0)
+    current_state = await state.get_state()
     
-    if user_id != ADMIN_ID and count >= 2:
-        await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title="5 генераций AI Portrait",
-            description="Оплата 5 дополнительных генераций",
-            payload="5_generations",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(label="5 генераций", amount=50)]
-        )
-        return
+    if not await check_limit(message, user_id): return
 
-    # Проверяем, есть ли последнее фото
-    if user_id in last_photo:
-        await message.answer("Применяю твои изменения к последнему фото... ⏳")
+    # 1. Если ждем текст для рисования с нуля
+    if current_state == UserState.waiting_for_text and user_id not in user_photos:
+        await message.answer("Рисую с нуля по описанию... 🎨")
         try:
-            file_id = last_photo[user_id]
+            response = await client.images.generate(
+                model="gemini-2.5-flash-image",
+                prompt=f"Высокодетализированное изображение: {message.text}. Стиль: реализм, 8k.",
+                response_format="b64_json",
+                n=1,
+                size="1024x1024"
+            )
+            if response.data:
+                image_bytes = base64.b64decode(response.data[0].b64_json)
+                photo = BufferedInputFile(image_bytes, filename="art_from_text.jpg")
+                count = user_generations.get(user_id, 0)
+                user_generations[user_id] = count + 1
+                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
+                await state.clear()
+        except Exception as e:
+            await message.answer("Ошибка генерации.")
+
+    # 2. Если ждем текст для изменения фото
+    elif current_state == UserState.waiting_for_text and user_id in user_photos:
+        await message.answer("Применяю изменения к фото... ⏳")
+        try:
+            file_id = user_photos[user_id]
             file = await bot.get_file(file_id)
             file_path = f"temp_{user_id}.jpg"
             await bot.download_file(file.file_path, file_path)
-            
-            # Используем текст пользователя как промпт
-            prompt = message.text 
             
             with open(file_path, "rb") as image_file:
                 response = await client.images.edit(
                     model="gemini-2.5-flash-image",
                     image=image_file,
-                    prompt=prompt,
+                    prompt=message.text,
                     response_format="b64_json"
                 )
-            
-            if response.data and len(response.data) > 0:
-                image_base64 = response.data[0].b64_json
-                image_bytes = base64.b64decode(image_base64)
-                photo = BufferedInputFile(image_bytes, filename="ai_portrait_edit.jpg")
-                
+            if response.data:
+                image_bytes = base64.b64decode(response.data[0].b64_json)
+                photo = BufferedInputFile(image_bytes, filename="edit.jpg")
                 count = user_generations.get(user_id, 0)
                 user_generations[user_id] = count + 1
-                stats_data["total_generations"] += 1
-                save_stats(stats_data)
-                
                 left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
-            else:
-                await message.answer("Не удалось изменить фото.")
-                
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
+                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
+                await state.clear()
+            if os.path.exists(file_path): os.remove(file_path)
         except Exception as e:
-            logging.error(f"Error: {e}")
-            await message.answer(f"Ошибка: {str(e)[:150]}...")
+            await message.answer("Ошибка редактирования.")
 
     else:
-        # Если фото нет, генерируем с нуля
-        await message.answer("Рисую по твоему описанию, подожди около 30 секунд... 🎨")
-        
-        try:
-            response = await client.images.generate(
-                model="gemini-2.5-flash-image",
-                prompt=f"Высокодетализированное изображение: {message.text}. Стиль: реализм, 8k, качество.",
-                response_format="b64_json",
-                n=1,
-                size="1024x1024"
-            )
-            
-            if response.data and len(response.data) > 0:
-                image_base64 = response.data[0].b64_json
-                image_bytes = base64.b64decode(image_base64)
-                photo = BufferedInputFile(image_bytes, filename="ai_portrait_art.jpg")
-                
-                count = user_generations.get(user_id, 0)
-                user_generations[user_id] = count + 1
-                stats_data["total_generations"] += 1
-                save_stats(stats_data)
-                
-                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
-            else:
-                await message.answer("Не удалось нарисовать.")
-                
-        except Exception as e:
-            logging.error(f"Error: {e}")
-            await message.answer(f"Ошибка: {str(e)[:150]}...")
+        await message.answer("Я не понял команду. Нажми /start и выбери действие из меню 👇")
 
+# --- ОПЛАТА ---
 @dp.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @dp.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    user_id = message.from_user.id
-    user_generations[user_id] = 0 
-    
-    referrer_id = stats_data["referrals"].get(str(user_id))
-    
-    if referrer_id:
-        current_ref_count = user_generations.get(int(referrer_id), 0)
-        user_generations[int(referrer_id)] = current_ref_count - 2 
-        try:
-            await bot.send_message(int(referrer_id), "🎉 Твой друг купил пакет! Тебе начислено +2 бесплатные генерации.")
-        except:
-            pass
-            
-    await message.answer("Оплата прошла успешно! 🎉 Тебе добавлено 5 новых генераций.")
+async def payment_ok(message: Message):
+    user_generations[message.from_user.id] = 0 
+    await message.answer("Оплата прошла! 🎉 Добавлено 5 генераций.")
 
 async def main():
     await dp.start_polling(bot)
