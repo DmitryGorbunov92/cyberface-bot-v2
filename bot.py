@@ -4,11 +4,12 @@ import logging
 import base64
 import json
 import aiohttp
+import re
 from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery, FSInputFile
-from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.types import Message, PreCheckoutQuery, LabeledPrice, BufferedInputFile, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -345,7 +346,6 @@ async def handle_music_gender(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("genre_"))
 async def handle_music_genre(callback: CallbackQuery, state: FSMContext):
-    # data вида: genre_rock_male
     parts = callback.data.split("_")
     genre = parts[1]
     gender = parts[2]
@@ -356,13 +356,11 @@ async def handle_music_genre(callback: CallbackQuery, state: FSMContext):
     
     await state.clear()
     
-    # Если это админ (ты) — генерируем бесплатно
     if user_id == ADMIN_ID:
         await callback.message.edit_text(f"🎵 Тема: {prompt_text}\n🎸 Жанр: {genre}\n\n[Админ-режим] Генерирую песню бесплатно... 🎶")
         await generate_music(callback.message, prompt_text, genre, gender)
         return
 
-    # Для остальных пользователей — выставляем счет
     await callback.message.edit_text(f"🎵 Тема: {prompt_text}\n🎸 Жанр: {genre}\n\nГенерация песни стоит 50 Stars. После оплаты ты получишь сразу 2 варианта трека. Выставить счет?")
     
     await bot.send_invoice(
@@ -376,32 +374,34 @@ async def handle_music_genre(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ МУЗЫКИ (И СКАЧИВАНИЯ) ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ МУЗЫКИ ---
 async def generate_music(message: Message, prompt_text: str, genre: str, gender: str):
     try:
-        # Запрос к Suno через BotHub
-        response = await client.audio.speech.create(
-            model="suno-v5.5",
-            voice="alloy", 
-            input=f"Создай песню на русском языке. Жанр: {genre}. Голос: {gender}. Тема: {prompt_text}. Чистый русский вокал без акцента.",
-            extra_body={
-                "prompt": f"Создай песню на русском языке. Жанр: {genre}. Голос: {gender}. Тема: {prompt_text}. Чистый русский вокал без акцента.",
-                "make_instrumental": False
-            }
+        response = await client.chat.completions.create(
+            model="suno-v6",
+            messages=[
+                {"role": "user", "content": f"Создай песню на русском. Жанр: {genre}. Голос: {gender}. Тема: {prompt_text}. Чистый вокал без акцента."}
+            ]
         )
         
-        # В реальности BotHub вернет ссылку на аудио. 
-        # Скачиваем файл по ссылке (если API вернул URL)
-        # Здесь мы предполагаем, что response.url содержит ссылку на файл.
-        # В зависимости от формата ответа BotHub, код может отличаться.
+        content = response.choices[0].message.content
         
-        # Для примера, если это прямой поток байтов:
-        audio_bytes = await response.aread()
+        # Ищем ссылку на mp3 в ответе
+        audio_url_match = re.search(r'https://[^\s\)]+\.mp3', content)
         
-        # Отправляем аудио
-        audio_file = BufferedInputFile(audio_bytes, filename="song.mp3")
-        await message.answer_audio(audio=audio_file, caption="🎶 Твоя песня готова! Наслаждайся!")
-        
+        if audio_url_match:
+            audio_url = audio_url_match.group(0)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(audio_url) as resp:
+                    if resp.status == 200:
+                        audio_bytes = await resp.read()
+                        audio_file = BufferedInputFile(audio_bytes, filename="song.mp3")
+                        await message.answer_audio(audio=audio_file, caption="🎶 Твоя песня готова! Наслаждайся!")
+                    else:
+                        await message.answer(f"Не удалось скачать песню (Код: {resp.status})")
+        else:
+            await message.answer(f"Песня сгенерирована, но ссылка не найдена. Ответ BotHub:\n\n{content[:500]}...")
+            
     except Exception as e:
         logging.error(f"Music Error: {e}")
         await message.answer(f"Ошибка при генерации музыки: {str(e)[:150]}...")
@@ -422,7 +422,7 @@ async def payment_ok(message: Message, state: FSMContext):
         prompt_text = "_".join(parts[4:]) 
         
         await message.answer("✅ Оплата получена! Генерирую песню (это займет около 2-3 минут)... 🎶")
-        await generate_music(message, prompt_text, genre, gender)
+        await generate_music(message, prompt_text, gender)
             
     else:
         user_generations[message.from_user.id] = 0 
