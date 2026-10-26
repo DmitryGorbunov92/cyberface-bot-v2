@@ -24,6 +24,7 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
+last_photo = {} # <--- НОВОЕ: Храним последнее фото для текстовых правок
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
@@ -80,7 +81,6 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
-# --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
 async def start_with_ref(message: Message, command: CommandStart):
     user_id = message.from_user.id
@@ -88,13 +88,12 @@ async def start_with_ref(message: Message, command: CommandStart):
     
     if str(user_id) not in stats_data["total_users"]:
         stats_data["total_users"].append(str(user_id))
-        # Запоминаем, кто пригласил (если это не сам пользователь)
         if referrer_id and referrer_id != str(user_id):
             stats_data["referrals"][str(user_id)] = referrer_id
         save_stats(stats_data)
 
     await message.answer(
-        "Привет! Я бот CyberFace. 🤖\n"
+        "Привет! Я бот AI Portrait. 🤖\n"
         "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
         "🎁 Тебе доступно 2 бесплатные генерации.",
         reply_markup=get_main_keyboard()
@@ -108,7 +107,7 @@ async def start_cmd(message: Message):
         save_stats(stats_data)
 
     await message.answer(
-        "Привет! Я бот CyberFace. 🤖\n"
+        "Привет! Я бот AI Portrait. 🤖\n"
         "Пришли мне своё фото и выбери стиль, или просто напиши, что нарисовать.\n\n"
         "🎁 Тебе доступно 2 бесплатные генерации.",
         reply_markup=get_main_keyboard()
@@ -132,7 +131,7 @@ async def stats_cmd(message: Message):
     total = len(stats_data["total_users"])
     gens = stats_data["total_generations"]
     refs = len(stats_data["referrals"])
-    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов (перешли): {refs}", parse_mode="Markdown")
+    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
 
 @dp.message(F.text == "ℹ️ Как это работает")
 async def help_cmd(message: Message):
@@ -142,6 +141,7 @@ async def help_cmd(message: Message):
         "2️⃣ Выбери стиль из предложенных кнопок (для фото).\n"
         "3️⃣ Нейросеть обработает запрос (займет около 30 секунд).\n"
         "4️⃣ Получи крутой арт!\n\n"
+        "💡 Если хочешь изменить последнее фото, просто напиши, что сделать (например, 'сделай закат').\n\n"
         "💳 Первые 2 генерации — бесплатно.\n"
         "Дальше: 50 Telegram Stars за пакет из 5 генераций."
     )
@@ -150,7 +150,6 @@ async def help_cmd(message: Message):
 async def ask_photo(message: Message):
     await message.answer("Жду твоё фото! Просто отправь его в чат. 📥")
 
-# --- ОБРАБОТКА ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     user_id = message.from_user.id
@@ -160,7 +159,7 @@ async def handle_photo(message: Message):
         await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
         await bot.send_invoice(
             chat_id=message.chat.id,
-            title="5 генераций CyberFace",
+            title="5 генераций AI Portrait",
             description="Оплата 5 дополнительных генераций",
             payload="5_generations",
             provider_token="",
@@ -170,7 +169,8 @@ async def handle_photo(message: Message):
         return
 
     user_photos[user_id] = message.photo[-1].file_id
-    await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
+    last_photo[user_id] = message.photo[-1].file_id # <--- Запоминаем фото
+    await message.answer("Отличное фото! Выбери стиль или напиши текстом, что с ним сделать:", reply_markup=get_styles_keyboard())
 
 @dp.callback_query(F.data.startswith("style_"))
 async def handle_style_choice(callback: CallbackQuery):
@@ -203,7 +203,7 @@ async def handle_style_choice(callback: CallbackQuery):
         if response.data and len(response.data) > 0:
             image_base64 = response.data[0].b64_json
             image_bytes = base64.b64decode(image_base64)
-            photo = BufferedInputFile(image_bytes, filename="cyberface.jpg")
+            photo = BufferedInputFile(image_bytes, filename="ai_portrait.jpg")
             
             count = user_generations.get(user_id, 0)
             user_generations[user_id] = count + 1
@@ -222,7 +222,7 @@ async def handle_style_choice(callback: CallbackQuery):
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
 
-# --- ОБРАБОТКА ТЕКСТА ---
+# --- ОБРАБОТКА ТЕКСТА (С УЧЕТОМ ПОСЛЕДНЕГО ФОТО) ---
 @dp.message(F.text)
 async def handle_text(message: Message):
     if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает", "🎁 Пригласить друга"]:
@@ -235,7 +235,7 @@ async def handle_text(message: Message):
         await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
         await bot.send_invoice(
             chat_id=message.chat.id,
-            title="5 генераций CyberFace",
+            title="5 генераций AI Portrait",
             description="Оплата 5 дополнительных генераций",
             payload="5_generations",
             provider_token="",
@@ -244,37 +244,80 @@ async def handle_text(message: Message):
         )
         return
 
-    await message.answer("Рисую по твоему описанию, подожди около 30 секунд... 🎨")
-    
-    try:
-        response = await client.images.generate(
-            model="gemini-2.5-flash-image",
-            prompt=f"Высокодетализированное изображение: {message.text}. Стиль: реализм, 8k, качество.",
-            response_format="b64_json",
-            n=1,
-            size="1024x1024"
-        )
-        
-        if response.data and len(response.data) > 0:
-            image_base64 = response.data[0].b64_json
-            image_bytes = base64.b64decode(image_base64)
-            photo = BufferedInputFile(image_bytes, filename="cyberface_art.jpg")
+    # Проверяем, есть ли последнее фото
+    if user_id in last_photo:
+        await message.answer("Применяю твои изменения к последнему фото... ⏳")
+        try:
+            file_id = last_photo[user_id]
+            file = await bot.get_file(file_id)
+            file_path = f"temp_{user_id}.jpg"
+            await bot.download_file(file.file_path, file_path)
             
-            count = user_generations.get(user_id, 0)
-            user_generations[user_id] = count + 1
-            stats_data["total_generations"] += 1
-            save_stats(stats_data)
+            # Используем текст пользователя как промпт
+            prompt = message.text 
             
-            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-            await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
-        else:
-            await message.answer("Не удалось нарисовать.")
+            with open(file_path, "rb") as image_file:
+                response = await client.images.edit(
+                    model="gemini-2.5-flash-image",
+                    image=image_file,
+                    prompt=prompt,
+                    response_format="b64_json"
+                )
             
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await message.answer(f"Ошибка: {str(e)[:150]}...")
+            if response.data and len(response.data) > 0:
+                image_base64 = response.data[0].b64_json
+                image_bytes = base64.b64decode(image_base64)
+                photo = BufferedInputFile(image_bytes, filename="ai_portrait_edit.jpg")
+                
+                count = user_generations.get(user_id, 0)
+                user_generations[user_id] = count + 1
+                stats_data["total_generations"] += 1
+                save_stats(stats_data)
+                
+                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
+            else:
+                await message.answer("Не удалось изменить фото.")
+                
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            await message.answer(f"Ошибка: {str(e)[:150]}...")
 
-# --- ОПЛАТА И НАЧИСЛЕНИЕ БОНУСОВ ---
+    else:
+        # Если фото нет, генерируем с нуля
+        await message.answer("Рисую по твоему описанию, подожди около 30 секунд... 🎨")
+        
+        try:
+            response = await client.images.generate(
+                model="gemini-2.5-flash-image",
+                prompt=f"Высокодетализированное изображение: {message.text}. Стиль: реализм, 8k, качество.",
+                response_format="b64_json",
+                n=1,
+                size="1024x1024"
+            )
+            
+            if response.data and len(response.data) > 0:
+                image_base64 = response.data[0].b64_json
+                image_bytes = base64.b64decode(image_base64)
+                photo = BufferedInputFile(image_bytes, filename="ai_portrait_art.jpg")
+                
+                count = user_generations.get(user_id, 0)
+                user_generations[user_id] = count + 1
+                stats_data["total_generations"] += 1
+                save_stats(stats_data)
+                
+                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
+            else:
+                await message.answer("Не удалось нарисовать.")
+                
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            await message.answer(f"Ошибка: {str(e)[:150]}...")
+
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -284,13 +327,11 @@ async def process_successful_payment(message: Message):
     user_id = message.from_user.id
     user_generations[user_id] = 0 
     
-    # Проверяем, есть ли пригласивший у этого пользователя
     referrer_id = stats_data["referrals"].get(str(user_id))
     
     if referrer_id:
-        # Начисляем бонус пригласившему (+2 генерации)
         current_ref_count = user_generations.get(int(referrer_id), 0)
-        user_generations[int(referrer_id)] = current_ref_count - 2 # Сдвигаем лимит назад
+        user_generations[int(referrer_id)] = current_ref_count - 2 
         try:
             await bot.send_message(int(referrer_id), "🎉 Твой друг купил пакет! Тебе начислено +2 бесплатные генерации.")
         except:
