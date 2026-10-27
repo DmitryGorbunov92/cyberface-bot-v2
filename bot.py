@@ -92,6 +92,18 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+# ==========================================
+# ВАЖНО: КОМАНДА /stats СТОИТ В САМОМ ВЕРХУ, ЧТОБЫ ЕЁ НЕ ПЕРЕХВАТЫВАЛИ
+# ==========================================
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    total = len(stats_data["total_users"])
+    gens = stats_data["total_generations"]
+    refs = len(stats_data["referrals"])
+    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
+
 # --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
 async def start_with_ref(message: Message, command: CommandStart, state: FSMContext):
