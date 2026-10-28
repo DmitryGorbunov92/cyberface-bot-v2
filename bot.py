@@ -26,7 +26,7 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
-user_second_photos = {} # Хранилище для второго фото (для склейки)
+user_second_photos = {} # Хранилище для второго фото (для склейки в режиме редактирования)
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
@@ -34,6 +34,7 @@ STATS_FILE = "/data/stats.json"
 class UserState(StatesGroup):
     waiting_for_art_photo = State()
     waiting_for_edit_photo = State()
+    waiting_for_edit_text = State() # Ждем текст для редактирования
     waiting_for_gift_photo = State()
     waiting_for_text = State()
 
@@ -94,7 +95,7 @@ def get_styles_keyboard():
     return builder.as_markup()
 
 # ==========================================
-# КОМАНДА /stats (В САМОМ ВЕРХУ)
+# КОМАНДА /stats
 # ==========================================
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
@@ -154,20 +155,20 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
     
     if action == "art":
         await state.set_state(UserState.waiting_for_art_photo)
-        await callback.message.answer("Отправь мне своё фото (или два фото сразу, если хочешь склеить с кем-то) 📥")
+        await callback.message.answer("Отправь мне своё фото, и я предложу стили! 📥")
     elif action == "text_art":
         await state.set_state(UserState.waiting_for_text)
         await callback.message.answer("Напиши, что нарисовать (например, 'Кот в космосе'). 🎨")
     elif action == "edit":
         await state.set_state(UserState.waiting_for_edit_photo)
-        await callback.message.answer("Отправь фото, а затем напиши, что с ним сделать (например, 'сделай закат').")
+        await callback.message.answer("Отправь фото, которое хочешь изменить. (Можешь отправить сразу два фото, чтобы склеить людей!) 📥")
     elif action == "gift":
         await state.set_state(UserState.waiting_for_gift_photo)
         await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт.")
     elif action == "help":
         await callback.message.answer(
             "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
-            "Можно отправить два фото сразу, чтобы я склеил вас в одной сцене!"
+            "В режиме 'Изменить фото' можно отправить два фото, чтобы склеить лица в одной сцене."
         )
 
 # --- ПРОВЕРКА ЛИМИТОВ ---
@@ -187,7 +188,7 @@ async def check_limit(message: Message, user_id: int):
         return False
     return True
 
-# --- ПРИЕМ ФОТО (С ЛОГИКОЙ СКЛЕЙКИ) ---
+# --- ПРИЕМ ФОТО (С ЛОГИКОЙ СКЛЕЙКИ В РЕЖИМЕ РЕДАКТИРОВАНИЯ) ---
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -196,20 +197,20 @@ async def handle_photo(message: Message, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state == UserState.waiting_for_art_photo:
-        # Если у пользователя уже есть сохраненное фото, значит это второе для склейки
-        if user_id in user_photos:
-            user_second_photos[user_id] = message.photo[-1].file_id
-            await message.answer("Оба фото получены! Создаю сцену с двумя лицами... ⏳")
-            await generate_combined_image(message, user_id)
-        else:
-            # Первое фото
-            user_photos[user_id] = message.photo[-1].file_id
-            await message.answer("Фото получено! Теперь выбери стиль (или отправь второе фото, если хочешь склеить людей):", reply_markup=get_styles_keyboard())
-            
-    elif current_state == UserState.waiting_for_edit_photo:
         user_photos[user_id] = message.photo[-1].file_id
-        await state.set_state(UserState.waiting_for_text)
-        await message.answer("Фото получено! Теперь напиши текстом, что с ним сделать (например, 'замени фон на пляж').")
+        await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
+        
+    elif current_state == UserState.waiting_for_edit_photo:
+        # Если это первое фото в режиме редактирования
+        if user_id not in user_photos:
+            user_photos[user_id] = message.photo[-1].file_id
+            await state.set_state(UserState.waiting_for_edit_text) # Переводим в ожидание текста
+            await message.answer("Первое фото получено! Теперь напиши, что с ним сделать (например, 'сделай закат').\n\n💡 *Если хочешь склеить два лица, просто отправь второе фото вместо текста.*", parse_mode="Markdown")
+        else:
+            # Если пользователь отправил ВТОРОЕ фото вместо текста
+            user_second_photos[user_id] = message.photo[-1].file_id
+            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы в заброшенной психушке убегаем от призрака').")
+            
     elif current_state == UserState.waiting_for_gift_photo:
         user_photos[user_id] = message.photo[-1].file_id
         await message.answer("Фото получено! Выбери стиль для подарка:", reply_markup=get_styles_keyboard())
@@ -260,61 +261,13 @@ async def handle_style(callback: CallbackQuery, state: FSMContext):
         else:
             await callback.message.answer("Не удалось сгенерировать.")
         if os.path.exists(file_path): os.remove(file_path)
-        
-        # Очищаем фото после генерации
         if user_id in user_photos: del user_photos[user_id]
         
     except Exception as e:
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
 
-# --- ФУНКЦИЯ СКЛЕЙКИ ДВУХ ФОТО ---
-async def generate_combined_image(message: Message, user_id: int):
-    try:
-        file1 = await bot.get_file(user_photos[user_id])
-        path1 = f"temp1_{user_id}.jpg"
-        await bot.download_file(file1.file_path, path1)
-        
-        file2 = await bot.get_file(user_second_photos[user_id])
-        path2 = f"temp2_{user_id}.jpg"
-        await bot.download_file(file2.file_path, path2)
-        
-        # Передаем два фото в одном запросе
-        with open(path1, "rb") as f1, open(path2, "rb") as f2:
-            response = await client.images.edit(
-                model="gemini-2.5-flash-image",
-                image=[f1, f2], # Массив из двух фото
-                prompt="Создай новую сцену: первый человек (с первого фото) и второй человек (со второго фото) находятся вместе. Сохрани их лица и черты.",
-                response_format="b64_json"
-            )
-        
-        if response.data:
-            image_base64 = response.data[0].b64_json
-            image_bytes = base64.b64decode(image_base64)
-            photo = BufferedInputFile(image_bytes, filename="combined.jpg")
-            
-            count = user_generations.get(user_id, 0)
-            user_generations[user_id] = count + 1
-            stats_data["total_generations"] += 1
-            save_stats(stats_data)
-            
-            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-            await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
-            
-        os.remove(path1)
-        os.remove(path2)
-        
-    except Exception as e:
-        logging.error(f"Combine Error: {e}")
-        await message.answer("Ошибка при склейке фото. Попробуй еще раз.")
-        
-    finally:
-        # Очищаем память
-        if user_id in user_photos: del user_photos[user_id]
-        if user_id in user_second_photos: del user_second_photos[user_id]
-        await message.bot.get_session().close() # На всякий случай
-
-# --- ТЕКСТ (С УЧЕТОМ СОСТОЯНИЙ) ---
+# --- ОБРАБОТКА ТЕКСТА (РЕДАКТИРОВАНИЕ И ГЕНЕРАЦИЯ С НУЛЯ) ---
 @dp.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
     if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает", "🎁 Пригласить друга"]:
@@ -347,22 +300,38 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Текст для изменения фото
-    elif current_state == UserState.waiting_for_text and user_id in user_photos:
-        await message.answer("Применяю изменения к фото... ⏳")
+    # 2. Текст для редактирования (и склейки, если есть 2 фото)
+    elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
+        await message.answer("Применяю изменения... ⏳")
         try:
-            file_id = user_photos[user_id]
-            file = await bot.get_file(file_id)
-            file_path = f"temp_{user_id}.jpg"
-            await bot.download_file(file.file_path, file_path)
+            file1 = await bot.get_file(user_photos[user_id])
+            path1 = f"temp1_{user_id}.jpg"
+            await bot.download_file(file1.file_path, path1)
             
-            with open(file_path, "rb") as image_file:
-                response = await client.images.edit(
-                    model="gemini-2.5-flash-image",
-                    image=image_file,
-                    prompt=message.text,
-                    response_format="b64_json"
-                )
+            # Если есть второе фото, значит это склейка
+            if user_id in user_second_photos:
+                file2 = await bot.get_file(user_second_photos[user_id])
+                path2 = f"temp2_{user_id}.jpg"
+                await bot.download_file(file2.file_path, path2)
+                
+                with open(path1, "rb") as f1, open(path2, "rb") as f2:
+                    response = await client.images.edit(
+                        model="gemini-2.5-flash-image",
+                        image=[f1, f2], # Массив из двух фото
+                        prompt=message.text,
+                        response_format="b64_json"
+                    )
+                os.remove(path2)
+            else:
+                # Обычное редактирование одного фото
+                with open(path1, "rb") as f1:
+                    response = await client.images.edit(
+                        model="gemini-2.5-flash-image",
+                        image=f1,
+                        prompt=message.text,
+                        response_format="b64_json"
+                    )
+            
             if response.data:
                 image_bytes = base64.b64decode(response.data[0].b64_json)
                 photo = BufferedInputFile(image_bytes, filename="edit.jpg")
@@ -371,9 +340,13 @@ async def handle_text(message: Message, state: FSMContext):
                 left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
                 await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
                 await state.clear()
-            if os.path.exists(file_path): os.remove(file_path)
+            
+            if os.path.exists(path1): os.remove(path1)
             if user_id in user_photos: del user_photos[user_id]
+            if user_id in user_second_photos: del user_second_photos[user_id]
+            
         except Exception as e:
+            logging.error(f"Edit Error: {e}")
             await message.answer("Ошибка редактирования.")
 
     else:
