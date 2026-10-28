@@ -26,15 +26,15 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
-user_second_photos = {} # Хранилище для второго фото (для склейки в режиме редактирования)
+user_second_photos = {}
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
-# --- СОСТОЯНИЯ (FSM) ---
+# --- СОСТОЯНИЯ ---
 class UserState(StatesGroup):
     waiting_for_art_photo = State()
     waiting_for_edit_photo = State()
-    waiting_for_edit_text = State() # Ждем текст для редактирования
+    waiting_for_edit_text = State() # Ждем текст для редактирования (или склейки)
     waiting_for_gift_photo = State()
     waiting_for_text = State()
 
@@ -94,18 +94,6 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
-# ==========================================
-# КОМАНДА /stats
-# ==========================================
-@dp.message(Command("stats"))
-async def stats_cmd(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    total = len(stats_data["total_users"])
-    gens = stats_data["total_generations"]
-    refs = len(stats_data["referrals"])
-    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
-
 # --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
 async def start_with_ref(message: Message, command: CommandStart, state: FSMContext):
@@ -161,7 +149,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Напиши, что нарисовать (например, 'Кот в космосе'). 🎨")
     elif action == "edit":
         await state.set_state(UserState.waiting_for_edit_photo)
-        await callback.message.answer("Отправь фото, которое хочешь изменить. (Можешь отправить сразу два фото, чтобы склеить людей!) 📥")
+        await callback.message.answer("Отправь первое фото. (Если хочешь склеить два лица, отправь второе фото вместо текста!) 📥")
     elif action == "gift":
         await state.set_state(UserState.waiting_for_gift_photo)
         await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт.")
@@ -188,7 +176,7 @@ async def check_limit(message: Message, user_id: int):
         return False
     return True
 
-# --- ПРИЕМ ФОТО (С ЛОГИКОЙ СКЛЕЙКИ В РЕЖИМЕ РЕДАКТИРОВАНИЯ) ---
+# --- ПРИЕМ ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -201,15 +189,16 @@ async def handle_photo(message: Message, state: FSMContext):
         await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
         
     elif current_state == UserState.waiting_for_edit_photo:
-        # Если это первое фото в режиме редактирования
+        # Если это первое фото
         if user_id not in user_photos:
             user_photos[user_id] = message.photo[-1].file_id
-            await state.set_state(UserState.waiting_for_edit_text) # Переводим в ожидание текста
-            await message.answer("Первое фото получено! Теперь напиши, что с ним сделать (например, 'сделай закат').\n\n💡 *Если хочешь склеить два лица, просто отправь второе фото вместо текста.*", parse_mode="Markdown")
+            await state.set_state(UserState.waiting_for_edit_text) 
+            await message.answer("Первое фото получено! Теперь напиши, что с ним сделать (например, 'сделай закат').\n\n💡 *Или отправь второе фото, чтобы склеить двух людей.*", parse_mode="Markdown")
         else:
-            # Если пользователь отправил ВТОРОЕ фото вместо текста
+            # Если пользователь отправил ВТОРОЕ фото
             user_second_photos[user_id] = message.photo[-1].file_id
-            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы в заброшенной психушке убегаем от призрака').")
+            # ВАЖНО: Оставляем состояние waiting_for_edit_text, чтобы бот ждал текст!
+            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми.")
             
     elif current_state == UserState.waiting_for_gift_photo:
         user_photos[user_id] = message.photo[-1].file_id
@@ -267,7 +256,7 @@ async def handle_style(callback: CallbackQuery, state: FSMContext):
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
 
-# --- ОБРАБОТКА ТЕКСТА (РЕДАКТИРОВАНИЕ И ГЕНЕРАЦИЯ С НУЛЯ) ---
+# --- ОБРАБОТКА ТЕКСТА ---
 @dp.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
     if message.text.startswith('/') or message.text in ["📸 Создать фото", "ℹ️ Как это работает", "🎁 Пригласить друга"]:
@@ -300,7 +289,7 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Текст для редактирования (и склейки, если есть 2 фото)
+    # 2. Текст для редактирования (и склейки)
     elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
         await message.answer("Применяю изменения... ⏳")
         try:
@@ -308,17 +297,20 @@ async def handle_text(message: Message, state: FSMContext):
             path1 = f"temp1_{user_id}.jpg"
             await bot.download_file(file1.file_path, path1)
             
-            # Если есть второе фото, значит это склейка
             if user_id in user_second_photos:
+                # СКЛЕЙКА ДВУХ ФОТО
                 file2 = await bot.get_file(user_second_photos[user_id])
                 path2 = f"temp2_{user_id}.jpg"
                 await bot.download_file(file2.file_path, path2)
                 
+                # Специальный промпт для склейки
+                combined_prompt = f"Создай единую сцену. На первом фото человек А, на втором фото человек Б. Они должны быть вместе. Сцена: {message.text}. Сохрани их лица."
+                
                 with open(path1, "rb") as f1, open(path2, "rb") as f2:
                     response = await client.images.edit(
                         model="gemini-2.5-flash-image",
-                        image=[f1, f2], # Массив из двух фото
-                        prompt=message.text,
+                        image=[f1, f2],
+                        prompt=combined_prompt,
                         response_format="b64_json"
                     )
                 os.remove(path2)
