@@ -34,7 +34,7 @@ STATS_FILE = "/data/stats.json"
 class UserState(StatesGroup):
     waiting_for_art_photo = State()
     waiting_for_edit_photo = State()
-    waiting_for_edit_text = State() # Ждем текст для редактирования
+    waiting_for_edit_text = State()
     waiting_for_gift_photo = State()
     waiting_for_text = State()
 
@@ -93,6 +93,18 @@ def get_styles_keyboard():
     builder.button(text="🎞 Ретро", callback_data="style_retro")
     builder.adjust(2)
     return builder.as_markup()
+
+# ==========================================
+# КОМАНДА /stats (СТОИТ САМОЙ ПЕРВОЙ, ЧТОБЫ НЕ ПЕРЕХВАТЫВАЛИ)
+# ==========================================
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    total = len(stats_data["total_users"])
+    gens = stats_data["total_generations"]
+    refs = len(stats_data["referrals"])
+    await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
 
 # --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
@@ -186,12 +198,10 @@ async def handle_photo(message: Message, state: FSMContext):
     if current_state == UserState.waiting_for_edit_photo or current_state == UserState.waiting_for_edit_text:
         
         if current_state == UserState.waiting_for_edit_photo:
-            # Сохраняем ПЕРВОЕ фото
             user_photos[user_id] = message.photo[-1].file_id
             await state.set_state(UserState.waiting_for_edit_text)
             await message.answer("Первое фото получено! Теперь напиши, что с ним сделать, или **отправь второе фото**, чтобы склеить двух людей.")
         elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
-            # Сохраняем ВТОРОЕ фото
             user_second_photos[user_id] = message.photo[-1].file_id
             await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы убегаем от призрака').")
         return
@@ -208,7 +218,7 @@ async def handle_photo(message: Message, state: FSMContext):
     else:
         await message.answer("Сначала выбери действие в меню /start 👇")
 
-# --- ГЕНЕРАЦИЯ ПО СТИЛЮ (ОДНО ФОТО) ---
+# --- ГЕНЕРАЦИЯ ПО СТИЛЮ ---
 @dp.callback_query(F.data.startswith("style_"))
 async def handle_style(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -305,7 +315,6 @@ async def handle_text(message: Message, state: FSMContext):
                 path2 = f"temp2_{user_id}.jpg"
                 await bot.download_file(file2.file_path, path2)
                 
-                # Специальный промпт для склейки
                 combined_prompt = f"Создай единую сцену. На первом фото человек А, на втором фото человек Б. Они должны быть вместе. Сцена: {message.text}. Сохрани их лица."
                 
                 with open(path1, "rb") as f1, open(path2, "rb") as f2:
@@ -317,7 +326,7 @@ async def handle_text(message: Message, state: FSMContext):
                     )
                 os.remove(path2)
             else:
-                # Обычное редактирование одного фото
+                # Обычное редактирование
                 with open(path1, "rb") as f1:
                     response = await client.images.edit(
                         model="gemini-2.5-flash-image",
