@@ -34,7 +34,7 @@ STATS_FILE = "/data/stats.json"
 class UserState(StatesGroup):
     waiting_for_art_photo = State()
     waiting_for_edit_photo = State()
-    waiting_for_edit_text = State() # Ждем текст для редактирования (или склейки)
+    waiting_for_edit_text = State() # Ждем текст для редактирования
     waiting_for_gift_photo = State()
     waiting_for_text = State()
 
@@ -149,14 +149,14 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Напиши, что нарисовать (например, 'Кот в космосе'). 🎨")
     elif action == "edit":
         await state.set_state(UserState.waiting_for_edit_photo)
-        await callback.message.answer("Отправь первое фото. (Если хочешь склеить два лица, отправь второе фото вместо текста!) 📥")
+        await callback.message.answer("Отправь первое фото. 📥")
     elif action == "gift":
         await state.set_state(UserState.waiting_for_gift_photo)
         await callback.message.answer("🎁 Отлично! Отправь фото друга или близкого, и я сделаю для него крутой арт.")
     elif action == "help":
         await callback.message.answer(
             "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
-            "В режиме 'Изменить фото' можно отправить два фото, чтобы склеить лица в одной сцене."
+            "В режиме 'Изменить фото' можно отправить два фото подряд, чтобы склеить лица в одной сцене."
         )
 
 # --- ПРОВЕРКА ЛИМИТОВ ---
@@ -180,26 +180,28 @@ async def check_limit(message: Message, user_id: int):
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    current_state = await state.get_state()
+
+    # 1. Режим "Изменить фото" (Редактирование и склейка)
+    if current_state == UserState.waiting_for_edit_photo or current_state == UserState.waiting_for_edit_text:
+        
+        if current_state == UserState.waiting_for_edit_photo:
+            # Сохраняем ПЕРВОЕ фото
+            user_photos[user_id] = message.photo[-1].file_id
+            await state.set_state(UserState.waiting_for_edit_text)
+            await message.answer("Первое фото получено! Теперь напиши, что с ним сделать, или **отправь второе фото**, чтобы склеить двух людей.")
+        elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
+            # Сохраняем ВТОРОЕ фото
+            user_second_photos[user_id] = message.photo[-1].file_id
+            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы убегаем от призрака').")
+        return
+
+    # 2. Остальные режимы (Арт, Подарок)
     if not await check_limit(message, user_id): return
 
-    current_state = await state.get_state()
-    
     if current_state == UserState.waiting_for_art_photo:
         user_photos[user_id] = message.photo[-1].file_id
         await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
-        
-    elif current_state == UserState.waiting_for_edit_photo:
-        # Если это первое фото
-        if user_id not in user_photos:
-            user_photos[user_id] = message.photo[-1].file_id
-            await state.set_state(UserState.waiting_for_edit_text) 
-            await message.answer("Первое фото получено! Теперь напиши, что с ним сделать (например, 'сделай закат').\n\n💡 *Или отправь второе фото, чтобы склеить двух людей.*", parse_mode="Markdown")
-        else:
-            # Если пользователь отправил ВТОРОЕ фото
-            user_second_photos[user_id] = message.photo[-1].file_id
-            # ВАЖНО: Оставляем состояние waiting_for_edit_text, чтобы бот ждал текст!
-            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми.")
-            
     elif current_state == UserState.waiting_for_gift_photo:
         user_photos[user_id] = message.photo[-1].file_id
         await message.answer("Фото получено! Выбери стиль для подарка:", reply_markup=get_styles_keyboard())
