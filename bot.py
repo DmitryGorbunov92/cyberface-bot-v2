@@ -26,6 +26,7 @@ client = AsyncOpenAI(
 
 user_generations = {}
 user_photos = {} 
+user_second_photos = {} # Хранилище для второго фото (для склейки)
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
@@ -93,7 +94,7 @@ def get_styles_keyboard():
     return builder.as_markup()
 
 # ==========================================
-# ВАЖНО: КОМАНДА /stats СТОИТ В САМОМ ВЕРХУ, ЧТОБЫ ЕЁ НЕ ПЕРЕХВАТЫВАЛИ
+# КОМАНДА /stats (В САМОМ ВЕРХУ)
 # ==========================================
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
@@ -153,7 +154,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
     
     if action == "art":
         await state.set_state(UserState.waiting_for_art_photo)
-        await callback.message.answer("Отправь мне своё фото, и я предложу стили! 📥")
+        await callback.message.answer("Отправь мне своё фото (или два фото сразу, если хочешь склеить с кем-то) 📥")
     elif action == "text_art":
         await state.set_state(UserState.waiting_for_text)
         await callback.message.answer("Напиши, что нарисовать (например, 'Кот в космосе'). 🎨")
@@ -166,7 +167,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
     elif action == "help":
         await callback.message.answer(
             "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
-            "Первые 2 генерации бесплатно, дальше — 50 Stars за пакет."
+            "Можно отправить два фото сразу, чтобы я склеил вас в одной сцене!"
         )
 
 # --- ПРОВЕРКА ЛИМИТОВ ---
@@ -186,7 +187,7 @@ async def check_limit(message: Message, user_id: int):
         return False
     return True
 
-# --- ПРИЕМ ФОТО ---
+# --- ПРИЕМ ФОТО (С ЛОГИКОЙ СКЛЕЙКИ) ---
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -195,8 +196,16 @@ async def handle_photo(message: Message, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state == UserState.waiting_for_art_photo:
-        user_photos[user_id] = message.photo[-1].file_id
-        await message.answer("Отличное фото! Теперь выбери стиль:", reply_markup=get_styles_keyboard())
+        # Если у пользователя уже есть сохраненное фото, значит это второе для склейки
+        if user_id in user_photos:
+            user_second_photos[user_id] = message.photo[-1].file_id
+            await message.answer("Оба фото получены! Создаю сцену с двумя лицами... ⏳")
+            await generate_combined_image(message, user_id)
+        else:
+            # Первое фото
+            user_photos[user_id] = message.photo[-1].file_id
+            await message.answer("Фото получено! Теперь выбери стиль (или отправь второе фото, если хочешь склеить людей):", reply_markup=get_styles_keyboard())
+            
     elif current_state == UserState.waiting_for_edit_photo:
         user_photos[user_id] = message.photo[-1].file_id
         await state.set_state(UserState.waiting_for_text)
@@ -207,7 +216,7 @@ async def handle_photo(message: Message, state: FSMContext):
     else:
         await message.answer("Сначала выбери действие в меню /start 👇")
 
-# --- ГЕНЕРАЦИЯ ПО СТИЛЮ ---
+# --- ГЕНЕРАЦИЯ ПО СТИЛЮ (ОДНО ФОТО) ---
 @dp.callback_query(F.data.startswith("style_"))
 async def handle_style(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -251,9 +260,59 @@ async def handle_style(callback: CallbackQuery, state: FSMContext):
         else:
             await callback.message.answer("Не удалось сгенерировать.")
         if os.path.exists(file_path): os.remove(file_path)
+        
+        # Очищаем фото после генерации
+        if user_id in user_photos: del user_photos[user_id]
+        
     except Exception as e:
         logging.error(f"Error: {e}")
         await callback.message.answer(f"Ошибка: {str(e)[:150]}...")
+
+# --- ФУНКЦИЯ СКЛЕЙКИ ДВУХ ФОТО ---
+async def generate_combined_image(message: Message, user_id: int):
+    try:
+        file1 = await bot.get_file(user_photos[user_id])
+        path1 = f"temp1_{user_id}.jpg"
+        await bot.download_file(file1.file_path, path1)
+        
+        file2 = await bot.get_file(user_second_photos[user_id])
+        path2 = f"temp2_{user_id}.jpg"
+        await bot.download_file(file2.file_path, path2)
+        
+        # Передаем два фото в одном запросе
+        with open(path1, "rb") as f1, open(path2, "rb") as f2:
+            response = await client.images.edit(
+                model="gemini-2.5-flash-image",
+                image=[f1, f2], # Массив из двух фото
+                prompt="Создай новую сцену: первый человек (с первого фото) и второй человек (со второго фото) находятся вместе. Сохрани их лица и черты.",
+                response_format="b64_json"
+            )
+        
+        if response.data:
+            image_base64 = response.data[0].b64_json
+            image_bytes = base64.b64decode(image_base64)
+            photo = BufferedInputFile(image_bytes, filename="combined.jpg")
+            
+            count = user_generations.get(user_id, 0)
+            user_generations[user_id] = count + 1
+            stats_data["total_generations"] += 1
+            save_stats(stats_data)
+            
+            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
+            await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
+            
+        os.remove(path1)
+        os.remove(path2)
+        
+    except Exception as e:
+        logging.error(f"Combine Error: {e}")
+        await message.answer("Ошибка при склейке фото. Попробуй еще раз.")
+        
+    finally:
+        # Очищаем память
+        if user_id in user_photos: del user_photos[user_id]
+        if user_id in user_second_photos: del user_second_photos[user_id]
+        await message.bot.get_session().close() # На всякий случай
 
 # --- ТЕКСТ (С УЧЕТОМ СОСТОЯНИЙ) ---
 @dp.message(F.text)
@@ -266,7 +325,7 @@ async def handle_text(message: Message, state: FSMContext):
     
     if not await check_limit(message, user_id): return
 
-    # 1. Если ждем текст для рисования с нуля
+    # 1. Текст для генерации с нуля
     if current_state == UserState.waiting_for_text and user_id not in user_photos:
         await message.answer("Рисую с нуля по описанию... 🎨")
         try:
@@ -288,7 +347,7 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Если ждем текст для изменения фото
+    # 2. Текст для изменения фото
     elif current_state == UserState.waiting_for_text and user_id in user_photos:
         await message.answer("Применяю изменения к фото... ⏳")
         try:
@@ -313,6 +372,7 @@ async def handle_text(message: Message, state: FSMContext):
                 await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
                 await state.clear()
             if os.path.exists(file_path): os.remove(file_path)
+            if user_id in user_photos: del user_photos[user_id]
         except Exception as e:
             await message.answer("Ошибка редактирования.")
 
