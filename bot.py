@@ -94,8 +94,17 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+# НОВАЯ КЛАВИАТУРА ДЛЯ ВЫБОРА ПАКЕТА
+def get_packages_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 5 фото — 50 ⭐", callback_data="buy_5")
+    builder.button(text="📦 15 фото — 120 ⭐", callback_data="buy_15")
+    builder.button(text="📦 40 фото — 250 ⭐", callback_data="buy_40")
+    builder.adjust(1)
+    return builder.as_markup()
+
 # ==========================================
-# КОМАНДА /stats (СТОИТ САМОЙ ПЕРВОЙ, ЧТОБЫ НЕ ПЕРЕХВАТЫВАЛИ)
+# КОМАНДА /stats
 # ==========================================
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
@@ -123,7 +132,7 @@ async def start_with_ref(message: Message, command: CommandStart, state: FSMCont
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
         "Здесь ты можешь превратить свои фото в крутые арты, "
         "или отредактировать фото с помощью ИИ.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "🎁 Тебе доступна 1 бесплатная генерация.\n\n"
         "👇 **Выбери, что хочешь сделать:**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
@@ -141,7 +150,7 @@ async def start_cmd(message: Message, state: FSMContext):
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
         "Здесь ты можешь превратить свои фото в крутые арты, "
         "или отредактировать фото с помощью ИИ.\n\n"
-        "🎁 Тебе доступно 2 бесплатные генерации.\n\n"
+        "🎁 Тебе доступна 1 бесплатная генерация.\n\n"
         "👇 **Выбери, что хочешь сделать:**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
@@ -168,22 +177,16 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
     elif action == "help":
         await callback.message.answer(
             "Я умею делать арты по фото, генерировать картинки по тексту и менять фото по описанию. "
-            "В режиме 'Изменить фото' можно отправить два фото подряд, чтобы склеить лица в одной сцене."
+            "Первая генерация бесплатно, дальше — пакеты от 50 Stars."
         )
 
-# --- ПРОВЕРКА ЛИМИТОВ ---
+# --- ПРОВЕРКА ЛИМИТОВ (1 БЕСПЛАТНАЯ) ---
 async def check_limit(message: Message, user_id: int):
     count = user_generations.get(user_id, 0)
-    if user_id != ADMIN_ID and count >= 2:
-        await message.answer("Бесплатные генерации закончились! Хочешь еще 5 штук за 50 Stars?")
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title="5 генераций AI Portrait",
-            description="Оплата 5 дополнительных генераций",
-            payload="5_generations",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(label="5 генераций", amount=50)]
+    if user_id != ADMIN_ID and count >= 1:
+        await message.answer(
+            "Твой бесплатный арт готов! Хочешь еще? Выбери пакет:",
+            reply_markup=get_packages_keyboard()
         )
         return False
     return True
@@ -257,8 +260,16 @@ async def handle_style(callback: CallbackQuery, state: FSMContext):
             stats_data["total_generations"] += 1
             save_stats(stats_data)
             
-            left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-            await callback.message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
+            # Если это была 1-я генерация (лимит исчерпан), показываем пакеты
+            if user_id != ADMIN_ID and user_generations[user_id] >= 1:
+                await callback.message.answer_photo(
+                    photo=photo, 
+                    caption="Готово! ⚡️ Бесплатная генерация использована.\n\nХочешь еще? Выбери пакет:",
+                    reply_markup=get_packages_keyboard()
+                )
+            else:
+                left = "∞" if user_id == ADMIN_ID else 1 - user_generations[user_id]
+                await callback.message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось бесплатных: {left}")
         else:
             await callback.message.answer("Не удалось сгенерировать.")
         if os.path.exists(file_path): os.remove(file_path)
@@ -295,8 +306,12 @@ async def handle_text(message: Message, state: FSMContext):
                 photo = BufferedInputFile(image_bytes, filename="art_from_text.jpg")
                 count = user_generations.get(user_id, 0)
                 user_generations[user_id] = count + 1
-                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
+                
+                if user_id != ADMIN_ID and user_generations[user_id] >= 1:
+                    await message.answer_photo(photo=photo, caption="Готово! ⚡️ Бесплатная генерация использована.\n\nХочешь еще?", reply_markup=get_packages_keyboard())
+                else:
+                    left = "∞" if user_id == ADMIN_ID else 1 - user_generations[user_id]
+                    await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
                 await state.clear()
         except Exception as e:
             await message.answer("Ошибка генерации.")
@@ -310,7 +325,6 @@ async def handle_text(message: Message, state: FSMContext):
             await bot.download_file(file1.file_path, path1)
             
             if user_id in user_second_photos:
-                # СКЛЕЙКА ДВУХ ФОТО
                 file2 = await bot.get_file(user_second_photos[user_id])
                 path2 = f"temp2_{user_id}.jpg"
                 await bot.download_file(file2.file_path, path2)
@@ -326,7 +340,6 @@ async def handle_text(message: Message, state: FSMContext):
                     )
                 os.remove(path2)
             else:
-                # Обычное редактирование
                 with open(path1, "rb") as f1:
                     response = await client.images.edit(
                         model="gemini-2.5-flash-image",
@@ -340,8 +353,12 @@ async def handle_text(message: Message, state: FSMContext):
                 photo = BufferedInputFile(image_bytes, filename="edit.jpg")
                 count = user_generations.get(user_id, 0)
                 user_generations[user_id] = count + 1
-                left = 2 - user_generations[user_id] if user_id != ADMIN_ID else "∞"
-                await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
+                
+                if user_id != ADMIN_ID and user_generations[user_id] >= 1:
+                    await message.answer_photo(photo=photo, caption="Готово! ⚡️ Бесплатная генерация использована.\n\nХочешь еще?", reply_markup=get_packages_keyboard())
+                else:
+                    left = "∞" if user_id == ADMIN_ID else 1 - user_generations[user_id]
+                    await message.answer_photo(photo=photo, caption=f"Готово! ⚡️ Осталось: {left}")
                 await state.clear()
             
             if os.path.exists(path1): os.remove(path1)
@@ -355,6 +372,31 @@ async def handle_text(message: Message, state: FSMContext):
     else:
         await message.answer("Я не понял команду. Нажми /start и выбери действие из меню 👇")
 
+# --- ОБРАБОТКА ПОКУПОК (ПАКЕТЫ) ---
+@dp.callback_query(F.data.startswith("buy_"))
+async def handle_buy(callback: CallbackQuery):
+    package = callback.data.replace("buy_", "")
+    
+    if package == "5":
+        title, amount, stars = "5 генераций", 5, 50
+    elif package == "15":
+        title, amount, stars = "15 генераций", 15, 120
+    elif package == "40":
+        title, amount, stars = "40 генераций", 40, 250
+    else:
+        return
+
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title=f"Пакет: {title}",
+        description=f"Оплата {amount} дополнительных генераций",
+        payload=f"pay_{amount}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=stars)]
+    )
+    await callback.answer()
+
 # --- ОПЛАТА ---
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
@@ -362,8 +404,16 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def payment_ok(message: Message, state: FSMContext):
-    user_generations[message.from_user.id] = 0 
-    await message.answer("Оплата прошла! 🎉 Добавлено 5 генераций.")
+    payload = message.successful_payment.invoice_payload
+    user_id = message.from_user.id
+    
+    if payload.startswith("pay_"):
+        amount = int(payload.split("_")[1])
+        # Начисляем купленные генерации (вычитаем из счетчика)
+        current_used = user_generations.get(user_id, 0)
+        user_generations[user_id] = current_used - amount 
+        
+        await message.answer(f"✅ Оплата прошла! Тебе добавлено {amount} генераций. Приятного творчества! 🎉")
 
 async def main():
     await dp.start_polling(bot)
