@@ -94,7 +94,6 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
-# НОВАЯ КЛАВИАТУРА ДЛЯ ВЫБОРА ПАКЕТА
 def get_packages_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 5 фото — 50 ⭐", callback_data="buy_5")
@@ -103,9 +102,7 @@ def get_packages_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
-# ==========================================
-# КОМАНДА /stats
-# ==========================================
+# --- КОМАНДА СТАТИСТИКИ ---
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -197,19 +194,16 @@ async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
 
-    # 1. Режим "Изменить фото" (Редактирование и склейка)
     if current_state == UserState.waiting_for_edit_photo or current_state == UserState.waiting_for_edit_text:
-        
         if current_state == UserState.waiting_for_edit_photo:
             user_photos[user_id] = message.photo[-1].file_id
             await state.set_state(UserState.waiting_for_edit_text)
             await message.answer("Первое фото получено! Теперь напиши, что с ним сделать, или **отправь второе фото**, чтобы склеить двух людей.")
         elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
             user_second_photos[user_id] = message.photo[-1].file_id
-            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы убегаем от призрака').")
+            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми.")
         return
 
-    # 2. Остальные режимы (Арт, Подарок)
     if not await check_limit(message, user_id): return
 
     if current_state == UserState.waiting_for_art_photo:
@@ -260,7 +254,6 @@ async def handle_style(callback: CallbackQuery, state: FSMContext):
             stats_data["total_generations"] += 1
             save_stats(stats_data)
             
-            # Если это была 1-я генерация (лимит исчерпан), показываем пакеты
             if user_id != ADMIN_ID and user_generations[user_id] >= 1:
                 await callback.message.answer_photo(
                     photo=photo, 
@@ -290,7 +283,6 @@ async def handle_text(message: Message, state: FSMContext):
     
     if not await check_limit(message, user_id): return
 
-    # 1. Текст для генерации с нуля
     if current_state == UserState.waiting_for_text and user_id not in user_photos:
         await message.answer("Рисую с нуля по описанию... 🎨")
         try:
@@ -316,7 +308,6 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Текст для редактирования (и склейки)
     elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
         await message.answer("Применяю изменения... ⏳")
         try:
@@ -372,7 +363,7 @@ async def handle_text(message: Message, state: FSMContext):
     else:
         await message.answer("Я не понял команду. Нажми /start и выбери действие из меню 👇")
 
-# --- ОБРАБОТКА ПОКУПОК (ПАКЕТЫ) ---
+# --- ОБРАБОТКА ПОКУПОК ---
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_buy(callback: CallbackQuery):
     package = callback.data.replace("buy_", "")
@@ -409,10 +400,14 @@ async def payment_ok(message: Message, state: FSMContext):
     
     if payload.startswith("pay_"):
         amount = int(payload.split("_")[1])
-        # Начисляем купленные генерации (вычитаем из счетчика)
         current_used = user_generations.get(user_id, 0)
-        user_generations[user_id] = current_used - amount 
         
+        # Защита от отрицательных значений
+        new_balance = current_used - amount
+        if new_balance < 0:
+            new_balance = 0
+            
+        user_generations[user_id] = new_balance 
         await message.answer(f"✅ Оплата прошла! Тебе добавлено {amount} генераций. Приятного творчества! 🎉")
 
 async def main():
