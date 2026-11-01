@@ -112,7 +112,7 @@ async def stats_cmd(message: Message):
     refs = len(stats_data["referrals"])
     await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
 
-# --- СТАРТ ---
+# --- СТАРТ (ОБНОВЛЕННЫЙ ТЕКСТ) ---
 @dp.message(CommandStart(deep_link=True))
 async def start_with_ref(message: Message, command: CommandStart, state: FSMContext):
     await state.clear()
@@ -127,10 +127,9 @@ async def start_with_ref(message: Message, command: CommandStart, state: FSMCont
 
     await message.answer(
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
-        "Здесь ты можешь превратить свои фото в крутые арты, "
-        "или отредактировать фото с помощью ИИ.\n\n"
-        "🎁 Тебе доступна 1 бесплатная генерация.\n\n"
-        "👇 **Выбери, что хочешь сделать:**",
+        "Я превращаю твои обычные фото в крутые арты с помощью нейросети.\n\n"
+        "🎁 **Тебе доступна 1 бесплатная генерация.**\n\n"
+        "👇 **Чтобы получить арт, просто нажми кнопку «🎨 Создать арт по фото» и отправь мне своё селфи.**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
     )
@@ -145,10 +144,9 @@ async def start_cmd(message: Message, state: FSMContext):
 
     await message.answer(
         "👋 **Добро пожаловать в AI Portrait!**\n\n"
-        "Здесь ты можешь превратить свои фото в крутые арты, "
-        "или отредактировать фото с помощью ИИ.\n\n"
-        "🎁 Тебе доступна 1 бесплатная генерация.\n\n"
-        "👇 **Выбери, что хочешь сделать:**",
+        "Я превращаю твои обычные фото в крутые арты с помощью нейросети.\n\n"
+        "🎁 **Тебе доступна 1 бесплатная генерация.**\n\n"
+        "👇 **Чтобы получить арт, просто нажми кнопку «🎨 Создать арт по фото» и отправь мне своё селфи.**",
         reply_markup=get_start_showcase(),
         parse_mode="Markdown"
     )
@@ -194,6 +192,7 @@ async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
 
+    # 1. Режим "Изменить фото" (Редактирование и склейка)
     if current_state == UserState.waiting_for_edit_photo or current_state == UserState.waiting_for_edit_text:
         if current_state == UserState.waiting_for_edit_photo:
             user_photos[user_id] = message.photo[-1].file_id
@@ -201,9 +200,10 @@ async def handle_photo(message: Message, state: FSMContext):
             await message.answer("Первое фото получено! Теперь напиши, что с ним сделать, или **отправь второе фото**, чтобы склеить двух людей.")
         elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
             user_second_photos[user_id] = message.photo[-1].file_id
-            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми.")
+            await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы убегаем от призрака').")
         return
 
+    # 2. Остальные режимы (Арт, Подарок)
     if not await check_limit(message, user_id): return
 
     if current_state == UserState.waiting_for_art_photo:
@@ -283,6 +283,7 @@ async def handle_text(message: Message, state: FSMContext):
     
     if not await check_limit(message, user_id): return
 
+    # 1. Текст для генерации с нуля
     if current_state == UserState.waiting_for_text and user_id not in user_photos:
         await message.answer("Рисую с нуля по описанию... 🎨")
         try:
@@ -308,6 +309,7 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
+    # 2. Текст для редактирования (и склейки)
     elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
         await message.answer("Применяю изменения... ⏳")
         try:
@@ -402,7 +404,6 @@ async def payment_ok(message: Message, state: FSMContext):
         amount = int(payload.split("_")[1])
         current_used = user_generations.get(user_id, 0)
         
-        # Защита от отрицательных значений
         new_balance = current_used - amount
         if new_balance < 0:
             new_balance = 0
