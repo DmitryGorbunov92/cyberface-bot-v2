@@ -30,6 +30,10 @@ user_second_photos = {}
 ADMIN_ID = 1343198511
 STATS_FILE = "/data/stats.json" 
 
+# --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ АКЦИЙ ---
+DISCOUNT_PERCENT = 0
+PROMO_TEXT = ""
+
 # --- СОСТОЯНИЯ ---
 class UserState(StatesGroup):
     waiting_for_art_photo = State()
@@ -94,11 +98,28 @@ def get_styles_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+# Функция для расчета цены со скидкой
+def get_discounted_price(original_price):
+    if DISCOUNT_PERCENT > 0:
+        return int(original_price * (1 - DISCOUNT_PERCENT / 100))
+    return original_price
+
 def get_packages_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 5 фото — 50 ⭐", callback_data="buy_5")
-    builder.button(text="📦 15 фото — 120 ⭐", callback_data="buy_15")
-    builder.button(text="📦 40 фото — 250 ⭐", callback_data="buy_40")
+    
+    # Считаем цены со скидкой (если она есть)
+    p5 = get_discounted_price(50)
+    p15 = get_discounted_price(120)
+    p40 = get_discounted_price(250)
+    
+    # Если скидка есть, показываем старую цену для сравнения
+    text_5 = f"📦 5 фото — {p5} ⭐ (вместо 50)" if DISCOUNT_PERCENT > 0 else f"📦 5 фото — {p5} ⭐"
+    text_15 = f"📦 15 фото — {p15} ⭐ (вместо 120)" if DISCOUNT_PERCENT > 0 else f"📦 15 фото — {p15} ⭐"
+    text_40 = f"📦 40 фото — {p40} ⭐ (вместо 250)" if DISCOUNT_PERCENT > 0 else f"📦 40 фото — {p40} ⭐"
+    
+    builder.button(text=text_5, callback_data="buy_5")
+    builder.button(text=text_15, callback_data="buy_15")
+    builder.button(text=text_40, callback_data="buy_40")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -112,7 +133,77 @@ async def stats_cmd(message: Message):
     refs = len(stats_data["referrals"])
     await message.answer(f"📊 **Статистика:**\n👥 Юзеров: {total}\n🎨 Генераций: {gens}\n🔗 Рефералов: {refs}", parse_mode="Markdown")
 
-# --- СТАРТ (ОБНОВЛЕННЫЙ ТЕКСТ) ---
+# --- НОВЫЕ КОМАНДЫ ДЛЯ АКЦИЙ ---
+@dp.message(Command("set_discount"))
+async def set_discount(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    global DISCOUNT_PERCENT
+    try:
+        # Берем число из команды
+        percent = int(message.text.split()[1])
+        if 0 < percent < 100:
+            DISCOUNT_PERCENT = percent
+            await message.answer(f"✅ Скидка {percent}% ВКЛЮЧЕНА. Цены пересчитаны.")
+        else:
+            await message.answer("Введи число от 1 до 99. Например: /set_discount 30")
+    except:
+        await message.answer("Ошибка. Напиши так: /set_discount 30")
+
+@dp.message(Command("stop_discount"))
+async def stop_discount(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    global DISCOUNT_PERCENT
+    DISCOUNT_PERCENT = 0
+    await message.answer("✅ Скидка ВЫКЛЮЧЕНА. Цены вернулись к обычным.")
+
+@dp.message(Command("set_promo"))
+async def set_promo(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    global PROMO_TEXT
+    text = message.text.replace("/set_promo", "").strip()
+    if text:
+        PROMO_TEXT = text
+        await message.answer(f"✅ Текст акции обновлен:\n\n{PROMO_TEXT}")
+    else:
+        await message.answer("Напиши текст после команды. Например: /set_promo Скидка 50%!")
+
+@dp.message(Command("test_promo"))
+async def test_promo(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not PROMO_TEXT:
+        await message.answer("Сначала задай текст: /set_promo ...")
+        return
+    await message.answer(PROMO_TEXT, reply_markup=get_packages_keyboard())
+    await message.answer("👆 Вот так это увидят пользователи.")
+
+@dp.message(Command("send_promo"))
+async def send_promo(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not PROMO_TEXT:
+        await message.answer("Сначала задай текст: /set_promo ...")
+        return
+    
+    await message.answer("🚀 Начинаю рассылку...")
+    users = stats_data["total_users"]
+    success = 0
+    fail = 0
+    
+    for user_id in users:
+        try:
+            await bot.send_message(chat_id=int(user_id), text=PROMO_TEXT, reply_markup=get_packages_keyboard())
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            fail += 1
+            
+    await message.answer(f"✅ Рассылка завершена.\nДошло: {success}\nЗаблокировали: {fail}")
+
+# --- СТАРТ ---
 @dp.message(CommandStart(deep_link=True))
 async def start_with_ref(message: Message, command: CommandStart, state: FSMContext):
     await state.clear()
@@ -175,7 +266,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
             "Первая генерация бесплатно, дальше — пакеты от 50 Stars."
         )
 
-# --- ПРОВЕРКА ЛИМИТОВ (1 БЕСПЛАТНАЯ) ---
+# --- ПРОВЕРКА ЛИМИТОВ ---
 async def check_limit(message: Message, user_id: int):
     count = user_generations.get(user_id, 0)
     if user_id != ADMIN_ID and count >= 1:
@@ -192,7 +283,6 @@ async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
 
-    # 1. Режим "Изменить фото" (Редактирование и склейка)
     if current_state == UserState.waiting_for_edit_photo or current_state == UserState.waiting_for_edit_text:
         if current_state == UserState.waiting_for_edit_photo:
             user_photos[user_id] = message.photo[-1].file_id
@@ -203,7 +293,6 @@ async def handle_photo(message: Message, state: FSMContext):
             await message.answer("Второе фото получено! Теперь напиши, какую сцену сделать с этими двумя людьми (например, 'мы убегаем от призрака').")
         return
 
-    # 2. Остальные режимы (Арт, Подарок)
     if not await check_limit(message, user_id): return
 
     if current_state == UserState.waiting_for_art_photo:
@@ -283,7 +372,6 @@ async def handle_text(message: Message, state: FSMContext):
     
     if not await check_limit(message, user_id): return
 
-    # 1. Текст для генерации с нуля
     if current_state == UserState.waiting_for_text and user_id not in user_photos:
         await message.answer("Рисую с нуля по описанию... 🎨")
         try:
@@ -309,7 +397,6 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception as e:
             await message.answer("Ошибка генерации.")
 
-    # 2. Текст для редактирования (и склейки)
     elif current_state == UserState.waiting_for_edit_text and user_id in user_photos:
         await message.answer("Применяю изменения... ⏳")
         try:
@@ -370,14 +457,18 @@ async def handle_text(message: Message, state: FSMContext):
 async def handle_buy(callback: CallbackQuery):
     package = callback.data.replace("buy_", "")
     
+    # Базовые цены
     if package == "5":
-        title, amount, stars = "5 генераций", 5, 50
+        title, amount, base_stars = "5 генераций", 5, 50
     elif package == "15":
-        title, amount, stars = "15 генераций", 15, 120
+        title, amount, base_stars = "15 генераций", 15, 120
     elif package == "40":
-        title, amount, stars = "40 генераций", 40, 250
+        title, amount, base_stars = "40 генераций", 40, 250
     else:
         return
+
+    # Применяем скидку, если она включена
+    final_stars = get_discounted_price(base_stars)
 
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
@@ -386,7 +477,7 @@ async def handle_buy(callback: CallbackQuery):
         payload=f"pay_{amount}",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label=title, amount=stars)]
+        prices=[LabeledPrice(label=title, amount=final_stars)]
     )
     await callback.answer()
 
